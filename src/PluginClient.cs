@@ -24,7 +24,9 @@ public sealed class PluginClient : IAsyncDisposable
     public static PluginClient? FromArgs(string[] args)
     {
         var values = ParseArgs(args);
-        if (!values.TryGetValue("pipe", out var pipe) || !values.TryGetValue("token", out var token) || !values.TryGetValue("plugin-id", out var id)) return null;
+        if (!values.TryGetValue("pipe", out var pipe) || !values.TryGetValue("plugin-id", out var id)) return null;
+        if (!values.TryGetValue("token", out var token) && values.TryGetValue("token-file", out var tokenFile)) { token = File.ReadAllText(tokenFile).Trim(); try { File.Delete(tokenFile); } catch { } }
+        if (string.IsNullOrWhiteSpace(token)) return null;
         var manifest = Path.Combine(AppContext.BaseDirectory, "plugin.json");
         if (!File.Exists(manifest)) manifest = Path.Combine(AppContext.BaseDirectory, "manifest.json");
         return File.Exists(manifest) ? new PluginClient(pipe, token, id, manifest) : null;

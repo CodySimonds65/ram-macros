@@ -35,7 +35,8 @@ public sealed class PluginClient : IAsyncDisposable
     {
         await _pipe.ConnectAsync(5000, cancellationToken);
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(_manifestPath, cancellationToken))).ToLowerInvariant();
-        await SendAsync("plugin.hello", new { pluginId = _pluginId, token = _token, protocolMajor = 1, protocolMinor = 0, manifestSha256 = hash, declaredCapabilities = _capabilities, processId = Environment.ProcessId }, cancellationToken: cancellationToken);
+        using var currentProcess = System.Diagnostics.Process.GetCurrentProcess();
+        await SendAsync("plugin.hello", new { pluginId = _pluginId, token = _token, protocolMajor = 1, protocolMinor = 0, manifestSha256 = hash, declaredCapabilities = _capabilities, processId = Environment.ProcessId, processStartTimeUtcTicks = currentProcess.StartTime.ToUniversalTime().Ticks }, cancellationToken: cancellationToken);
         var response = await ReadAsync(cancellationToken) ?? throw new InvalidDataException("Plugin host closed the handshake.");
         if (!string.Equals(response.Type, "host.accept", StringComparison.Ordinal)) throw new InvalidDataException("Plugin host rejected the handshake.");
     }

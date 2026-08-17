@@ -1,0 +1,20 @@
+<Window x:Class="RamMacros.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="RAM Macros" Height="720" Width="1100" Background="#090B10" Foreground="#F5F7FA" WindowStartupLocation="CenterScreen">
+  <Grid Margin="18">
+    <Grid.ColumnDefinitions><ColumnDefinition Width="310"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <Border Grid.Column="0" Background="#11141B" BorderBrush="#272D3A" BorderThickness="1" CornerRadius="14" Padding="14">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Bottom" Margin="0,14,0,0"><Button Content="＋  New macro" Click="NewMacro_Click" Background="#7C5CFC" Foreground="White" Padding="12,8"/><Button Content="Import bundle" Click="Import_Click" Margin="0,8,0,0" Background="#1D2230" Foreground="#F5F7FA" Padding="12,8"/></StackPanel>
+        <StackPanel><TextBlock Text="MACRO LIBRARY" FontSize="11" Foreground="#929AAD" FontWeight="SemiBold"/><TextBox x:Name="SearchBox" Margin="0,8,0,10" TextChanged="SearchBox_TextChanged"/><ListBox x:Name="MacroList" DisplayMemberPath="Name" SelectionChanged="MacroList_SelectionChanged"/></StackPanel>
+      </DockPanel>
+    </Border>
+    <Border Grid.Column="2" Background="#11141B" BorderBrush="#272D3A" BorderThickness="1" CornerRadius="14" Padding="18">
+      <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel><TextBlock Text="Recorder dashboard" FontSize="24" FontWeight="SemiBold"/><TextBlock Text="Record once, replay to selected managed clients without changing foreground focus." Foreground="#929AAD" Margin="0,3,0,0"/></StackPanel>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,22,0,12"><Button x:Name="RecordButton" Content="●  Record" Click="Record_Click" Background="#7C5CFC" Foreground="White" Padding="16,8"/><Button Content="Play selected" Click="Play_Click" Margin="8,0,0,0" Background="#1D2230" Foreground="#F5F7FA" Padding="16,8"/><Button Content="STACK" Click="Stack_Click" Margin="8,0,0,0" Background="#1D2230" Foreground="#F5F7FA" Padding="12,8"/><Button Content="GRID" Click="Grid_Click" Margin="8,0,0,0" Background="#1D2230" Foreground="#F5F7FA" Padding="12,8"/><Button Content="RESET" Click="Reset_Click" Margin="8,0,0,0" Background="#1D2230" Foreground="#F5F7FA" Padding="12,8"/></StackPanel>
+        <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><Border Background="#171B24" CornerRadius="10" Padding="12"><StackPanel><TextBlock Text="EVENT SEQUENCE" Foreground="#929AAD" FontSize="11"/><ListBox x:Name="EventList" Margin="0,8,0,0"/></StackPanel></Border><Border Grid.Column="2" Background="#171B24" CornerRadius="10" Padding="12"><StackPanel><TextBlock Text="ASSIGNMENTS &amp; ACTIVITY" Foreground="#929AAD" FontSize="11"/><TextBlock x:Name="StatusText" Text="Select a macro to begin." Margin="0,12,0,0" TextWrapping="Wrap"/></StackPanel></Border></Grid>
+        <TextBlock Grid.Row="3" x:Name="FooterText" Text="Background-safe mode: no focus APIs are used." Foreground="#929AAD" Margin="0,14,0,0"/>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>

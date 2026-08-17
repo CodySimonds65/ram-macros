@@ -1,5 +1,7 @@
 using System.Collections.ObjectModel;
+using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Interop;
 using Microsoft.Win32;
 
 namespace RamMacros;
@@ -7,14 +9,26 @@ namespace RamMacros;
 public partial class MainWindow : Window
 {
     private readonly ObservableCollection<MacroDefinition> _macros = [];
+    private readonly MacroRecorder _recorder;
+    private readonly GlobalInputCapture _inputCapture = new();
     private MacroDefinition? _selected;
     private bool _recording;
+    private nint _recordingWindow;
+    private nint _windowHandle;
 
     public MainWindow()
     {
         InitializeComponent();
         MacroList.ItemsSource = _macros;
         WindowAppearance.Apply(this);
+        _recorder = new MacroRecorder(
+            NativeWindowMetrics.GetForegroundWindow,
+            (window, _) =>
+            {
+                var metrics = NativeWindowMetrics.GetClientMetrics(window);
+                return (0, 0, metrics.Width, metrics.Height);
+            });
+        SourceInitialized += (_, _) => _windowHandle = new WindowInteropHelper(this).Handle;
     }
 
     private void NewMacro_Click(object sender, RoutedEventArgs e)
@@ -32,13 +46,104 @@ public partial class MainWindow : Window
     private void SearchBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) => MacroList.ItemsSource = _macros.Where(m => string.IsNullOrWhiteSpace(SearchBox.Text) || m.Name.Contains(SearchBox.Text, StringComparison.OrdinalIgnoreCase)).ToArray();
     private void MacroList_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
-        _selected = MacroList.SelectedItem as MacroDefinition; EventList.ItemsSource = _selected?.Events.Select(item => $"{item.OffsetMicroseconds / 1000.0:0.0} ms  {item.Kind}").ToArray(); StatusText.Text = _selected is null ? "Select a macro to begin." : $"{_selected.Name}\n{_selected.Events.Count} event(s)\nPortable normalized coordinates.";
+        _selected = MacroList.SelectedItem as MacroDefinition;
+        RefreshEventList();
     }
-    private void Record_Click(object sender, RoutedEventArgs e) { _recording = !_recording; RecordButton.Content = _recording ? "■  Stop recording" : "●  Record"; FooterText.Text = _recording ? "Recording managed-window input; injected events are ignored." : "Background-safe mode: no focus APIs are used."; }
+    private void Record_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selected is null)
+        {
+            StatusText.Text = "Create or select a macro first.";
+            return;
+        }
+        if (_recording)
+        {
+            StopRecording();
+            return;
+        }
+
+        _recording = true;
+        _recordingWindow = nint.Zero;
+        _recorder.Start([]);
+        _inputCapture.Start(HandleCapturedInput, _windowHandle);
+        RecordButton.Content = "■  Stop recording";
+        FooterText.Text = "Recording background input. Activate a managed Roblox window to bind it; injected events are ignored.";
+        StatusText.Text = "Waiting for a managed window to become foreground...";
+    }
+
+    private void HandleCapturedInput(CapturedInput captured)
+    {
+        if (!_recording || captured.WindowHandle == _windowHandle) return;
+        if (_recordingWindow == nint.Zero)
+        {
+            _recordingWindow = captured.WindowHandle;
+            var metrics = NativeWindowMetrics.GetClientMetrics(_recordingWindow);
+            _recorder.Start([new RecorderWindow("default", _recordingWindow, metrics.Width, metrics.Height)]);
+            Dispatcher.BeginInvoke(() => StatusText.Text = "Recording managed window input...\nTarget bound to the active window.");
+        }
+
+        var metricsNow = NativeWindowMetrics.GetClientMetrics(captured.WindowHandle);
+        var recorderWindow = new RecorderWindow("default", captured.WindowHandle, metricsNow.Width, metricsNow.Height);
+        if (_recorder.TryRecord(recorderWindow, captured.Event, captured.ClientX, captured.ClientY, captured.Injected, multiWindow: false))
+        {
+            Dispatcher.BeginInvoke(RefreshEventList);
+        }
+    }
+
+    private void StopRecording()
+    {
+        _inputCapture.Stop();
+        var events = _recorder.Stop();
+        _recording = false;
+        RecordButton.Content = "●  Record";
+        FooterText.Text = "Background-safe mode: no focus APIs are used.";
+        if (_selected is not null)
+        {
+            var updated = _selected with
+            {
+                Events = events,
+                RecordedClientWidth = NativeWindowMetrics.GetClientMetrics(_recordingWindow).Width,
+                RecordedClientHeight = NativeWindowMetrics.GetClientMetrics(_recordingWindow).Height
+            };
+            var index = _macros.IndexOf(_selected);
+            if (index >= 0) _macros[index] = updated;
+            _selected = updated;
+            MacroList.SelectedItem = updated;
+        }
+        RefreshEventList();
+        StatusText.Text = $"Recording stopped.\n{events.Count} event(s) captured.";
+    }
+
+    private void RefreshEventList()
+    {
+        var events = _recording ? _recorder.Snapshot() : _selected?.Events ?? [];
+        EventList.ItemsSource = events.Select(item => $"{item.OffsetMicroseconds / 1000.0:0.0} ms  {item.Kind}").ToArray();
+        StatusText.Text = _selected is null ? "Select a macro to begin." : $"{_selected.Name}\n{events.Count} event(s)\nPortable normalized coordinates.";
+    }
     private void Play_Click(object sender, RoutedEventArgs e) => StatusText.Text = _selected is null ? "Select a macro first." : "Playback requires managed account targets from the host.";
     private void Stack_Click(object sender, RoutedEventArgs e) => StatusText.Text = "STACK requested with SWP_NOACTIVATE.";
     private void Grid_Click(object sender, RoutedEventArgs e) => StatusText.Text = "GRID requested with SWP_NOACTIVATE.";
     private void Reset_Click(object sender, RoutedEventArgs e) => StatusText.Text = "RESET requested with SWP_NOACTIVATE.";
+    protected override void OnClosed(EventArgs e)
+    {
+        _inputCapture.Dispose();
+        base.OnClosed(e);
+    }
+}
+
+internal static class NativeWindowMetrics
+{
+    public static nint GetForegroundWindow() => GetForegroundWindowNative();
+
+    public static (int Width, int Height) GetClientMetrics(nint window)
+    {
+        if (window == nint.Zero || !GetClientRect(window, out var rect)) return (0, 0);
+        return (Math.Max(0, rect.Right - rect.Left), Math.Max(0, rect.Bottom - rect.Top));
+    }
+
+    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+    [DllImport("user32.dll")] private static extern bool GetClientRect(nint window, out RECT rect);
+    [DllImport("user32.dll", EntryPoint = "GetForegroundWindow")] private static extern nint GetForegroundWindowNative();
 }
 
 internal static class WindowAppearance

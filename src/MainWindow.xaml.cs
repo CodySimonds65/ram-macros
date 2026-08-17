@@ -11,14 +11,17 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<MacroDefinition> _macros = [];
     private readonly MacroRecorder _recorder;
     private readonly GlobalInputCapture _inputCapture = new();
+    private readonly ManagedAccountRegistry _managedAccounts;
     private MacroDefinition? _selected;
     private bool _recording;
     private nint _recordingWindow;
     private nint _windowHandle;
+    private int _eventRefreshPending;
 
-    public MainWindow()
+    public MainWindow(ManagedAccountRegistry? managedAccounts = null)
     {
         InitializeComponent();
+        _managedAccounts = managedAccounts ?? new ManagedAccountRegistry();
         MacroList.ItemsSource = _macros;
         WindowAppearance.Apply(this);
         _recorder = new MacroRecorder(
@@ -62,6 +65,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_managedAccounts.Snapshot().Count == 0)
+        {
+            StatusText.Text = "No running managed Roblox windows are available. Start an account and try again.";
+            return;
+        }
+
         _recording = true;
         _recordingWindow = nint.Zero;
         _recorder.Start([]);
@@ -74,20 +83,40 @@ public partial class MainWindow : Window
     private void HandleCapturedInput(CapturedInput captured)
     {
         if (!_recording || captured.WindowHandle == _windowHandle) return;
+        // Filter before binding a target. Injected input must never be able to
+        // select a window or enter the recorded sequence.
+        if (captured.Injected) return;
+        if (!_managedAccounts.TryResolve(captured.WindowHandle, out var account)) return;
         if (_recordingWindow == nint.Zero)
         {
             _recordingWindow = captured.WindowHandle;
             var metrics = NativeWindowMetrics.GetClientMetrics(_recordingWindow);
             _recorder.Start([new RecorderWindow("default", _recordingWindow, metrics.Width, metrics.Height)]);
-            Dispatcher.BeginInvoke(() => StatusText.Text = "Recording managed window input...\nTarget bound to the active window.");
+            QueueUi(() => StatusText.Text = $"Recording {account.Label} input...\nTarget bound to the managed window.");
         }
 
         var metricsNow = NativeWindowMetrics.GetClientMetrics(captured.WindowHandle);
         var recorderWindow = new RecorderWindow("default", captured.WindowHandle, metricsNow.Width, metricsNow.Height);
         if (_recorder.TryRecord(recorderWindow, captured.Event, captured.ClientX, captured.ClientY, captured.Injected, multiWindow: false))
         {
-            Dispatcher.BeginInvoke(RefreshEventList);
+            QueueEventListRefresh();
         }
+    }
+
+    private void QueueEventListRefresh()
+    {
+        if (Interlocked.Exchange(ref _eventRefreshPending, 1) != 0) return;
+        QueueUi(() =>
+        {
+            Interlocked.Exchange(ref _eventRefreshPending, 0);
+            RefreshEventList();
+        });
+    }
+
+    private void QueueUi(Action action)
+    {
+        if (Dispatcher.CheckAccess()) action();
+        else Dispatcher.BeginInvoke(action);
     }
 
     private void StopRecording()

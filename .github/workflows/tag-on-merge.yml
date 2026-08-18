@@ -73,28 +73,22 @@ jobs:
           } | Sort-Object Version -Descending | Select-Object -First 1)
           if ($existingForMerge.Count -gt 0) {
               $existing = $existingForMerge[0]
-              & gh release view $existing.Tag --repo $env:GITHUB_REPOSITORY *> $null
-              $releaseExists = ($LASTEXITCODE -eq 0)
               $releaseRunsJson = gh run list --workflow release.yml --repo $env:GITHUB_REPOSITORY --json status,headBranch --limit 100
               if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect existing release runs safely.' }
               $activeReleaseRuns = @($releaseRunsJson | ConvertFrom-Json | Where-Object {
                   $_.headBranch -eq $existing.Tag -and $_.status -in @('queued', 'in_progress', 'waiting', 'requested', 'pending')
               })
-              $publish = if ($releaseExists -or $activeReleaseRuns.Count -gt 0) { 'false' } else { 'true' }
+              $publish = if ($activeReleaseRuns.Count -gt 0) { 'false' } else { 'true' }
               "publish=$publish" >> $env:GITHUB_OUTPUT
               "create_tag=false" >> $env:GITHUB_OUTPUT
               "tag=$($existing.Tag)" >> $env:GITHUB_OUTPUT
               "version=$($existing.Version)" >> $env:GITHUB_OUTPUT
               "release_commit=$($existing.Commit)" >> $env:GITHUB_OUTPUT
-              if ($releaseExists) {
-                  "Release $($existing.Tag) is already published for merge $env:MERGE_SHA; nothing to do." >> $env:GITHUB_STEP_SUMMARY
-                  exit 0
-              }
               if ($activeReleaseRuns.Count -gt 0) {
                   "Release publication for $($existing.Tag) is already queued or running; nothing to do." >> $env:GITHUB_STEP_SUMMARY
                   exit 0
               }
-              "Tag $($existing.Tag) already exists for merge $env:MERGE_SHA; retrying the missing release publication." >> $env:GITHUB_STEP_SUMMARY
+              "Tag $($existing.Tag) already exists for merge $env:MERGE_SHA; validating or repairing its release publication." >> $env:GITHUB_STEP_SUMMARY
               exit 0
           }
 

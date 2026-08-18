@@ -4,8 +4,26 @@
     <Grid.ColumnDefinitions><ColumnDefinition Width="310"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
     <Border Grid.Column="0" Background="#11141B" BorderBrush="#272D3A" BorderThickness="1" CornerRadius="14" Padding="14">
       <DockPanel>
-        <StackPanel DockPanel.Dock="Bottom" Margin="0,14,0,0"><Button Content="＋  New macro" Click="NewMacro_Click" Background="#7C5CFC" Foreground="White" Padding="12,8"/><Button Content="Import bundle" Click="Import_Click" Margin="0,8,0,0" Background="#1D2230" Foreground="#F5F7FA" Padding="12,8"/></StackPanel>
-        <StackPanel><TextBlock Text="MACRO LIBRARY" FontSize="11" Foreground="#929AAD" FontWeight="SemiBold"/><TextBox x:Name="SearchBox" Margin="0,8,0,10" Background="#171B24" Foreground="#F5F7FA" BorderBrush="#272D3A" CaretBrush="#F5F7FA" TextChanged="SearchBox_TextChanged"/><ListBox x:Name="MacroList" DisplayMemberPath="Name" ItemContainerStyle="{StaticResource DarkListBoxItem}" SelectionChanged="MacroList_SelectionChanged" Background="#171B24" Foreground="#F5F7FA" BorderBrush="#272D3A"/></StackPanel>
+        <StackPanel DockPanel.Dock="Bottom" Margin="0,14,0,0"><Button Content="＋  New macro" Click="NewMacro_Click" Background="#7C5CFC" Foreground="White" Padding="12,8"/><Button Content="Import bundle" Click="Import_Click" Margin="0,8,0,0" Background="#1D2230" Foreground="#F5F7FA" Padding="12,8"/><Button Content="Export bundle" Click="Export_Click" Margin="0,8,0,0" Background="#1D2230" Foreground="#F5F7FA" Padding="12,8"/></StackPanel>
+        <StackPanel><TextBlock Text="MACRO LIBRARY" FontSize="11" Foreground="#929AAD" FontWeight="SemiBold"/><TextBox x:Name="SearchBox" Margin="0,8,0,10" Background="#171B24" Foreground="#F5F7FA" BorderBrush="#272D3A" CaretBrush="#F5F7FA" TextChanged="SearchBox_TextChanged"/><ListBox x:Name="MacroList" ItemContainerStyle="{StaticResource DarkListBoxItem}" SelectionChanged="MacroList_SelectionChanged" Background="#171B24" Foreground="#F5F7FA" BorderBrush="#272D3A">
+          <ListBox.ItemTemplate>
+            <DataTemplate>
+              <Grid MinHeight="28">
+                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding Name}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                <Button Grid.Column="1" Content="✎" Tag="{Binding}" Click="RenameMacro_Click" ToolTip="Rename macro" Width="28" Height="24" Padding="0" Background="Transparent" BorderBrush="Transparent" Foreground="#F5F7FA"/>
+                <Grid.ContextMenu>
+                  <ContextMenu Background="#171B24" Foreground="#F5F7FA">
+                    <MenuItem Header="Rename" Click="RenameContext_Click" Foreground="#F5F7FA"/>
+                    <MenuItem Header="Duplicate" Click="DuplicateContext_Click" Foreground="#F5F7FA"/>
+                    <Separator/>
+                    <MenuItem Header="Remove" Click="RemoveContext_Click" Foreground="#FF8A9A"/>
+                  </ContextMenu>
+                </Grid.ContextMenu>
+              </Grid>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox></StackPanel>
       </DockPanel>
     </Border>
     <Border Grid.Column="2" Background="#11141B" BorderBrush="#272D3A" BorderThickness="1" CornerRadius="14" Padding="18">

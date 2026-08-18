@@ -49,7 +49,9 @@ public partial class MainWindow : Window
 
     private void NewMacro_Click(object sender, RoutedEventArgs e)
     {
-        var macro = new MacroDefinition { Name = $"Macro {_macros.Count + 1}" };
+        var nextNumber = _macros.Count + 1;
+        while (_macros.Any(macro => string.Equals(macro.Name, $"Macro {nextNumber}", StringComparison.OrdinalIgnoreCase))) nextNumber++;
+        var macro = new MacroDefinition { Name = $"Macro {nextNumber}" };
         _macros.Add(macro);
         RefreshMacroList(macro);
     }

@@ -9,28 +9,33 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ram-macros-release
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: windows-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
     env:
       PLUGIN_ID: io.github.codysimonds65.ram.macros
       PLUGIN_NAME: RAM Macros
       REQUESTED_VERSION: ${{ inputs.version }}
-      RAM_PLUGIN_SIGNING_KEY: ${{ secrets.RAM_PLUGIN_SIGNING_KEY }}
-      RAM_PLUGIN_SIGNING_PUBLIC_KEY: ${{ secrets.RAM_PLUGIN_SIGNING_PUBLIC_KEY }}
 
     steps:
-      - name: Check out release source
-        uses: actions/checkout@v7
+      - name: Check out release source without credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v6
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
 
@@ -40,16 +45,64 @@ jobs:
         run: |
           $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "v$env:REQUESTED_VERSION" }
           if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Release version must be semantic version vMAJOR.MINOR.PATCH; received '$tag'." }
-          $manifest = Get-Content -Raw -LiteralPath 'plugin.json' | ConvertFrom-Json
-          if ($manifest.id -ne $env:PLUGIN_ID) { throw "plugin.json id '$($manifest.id)' does not match '$env:PLUGIN_ID'." }
-          if ($manifest.version -ne $tag.Substring(1)) { throw "plugin.json version '$($manifest.version)' does not match release tag '$tag'." }
+          $plugin = Get-Content -Raw -LiteralPath 'plugin.json' | ConvertFrom-Json
+          $manifest = Get-Content -Raw -LiteralPath 'manifest.json' | ConvertFrom-Json
+          if ($plugin.id -ne $env:PLUGIN_ID -or $manifest.id -ne $env:PLUGIN_ID) { throw "Plugin identity does not match '$env:PLUGIN_ID'." }
+          if ($plugin.version -ne $manifest.version) { throw "plugin.json and manifest.json versions must match." }
+          if ($plugin.version -ne $tag.Substring(1)) { throw "Plugin version '$($plugin.version)' does not match release tag '$tag'." }
+
+          $tagCommit = (git rev-list -n 1 $tag 2>$null)
+          if ($tagCommit -and $tagCommit.Trim() -ne $env:GITHUB_SHA) { throw "Existing tag '$tag' does not point to this release commit." }
+          $version = [version]$plugin.version
+          $latest = @(git tag --list 'v*' | ForEach-Object {
+              if ($_ -match '^v(\d+)\.(\d+)\.(\d+)$') { [pscustomobject]@{ Tag = $_; Version = [version]$_.Substring(1) } }
+          } | Sort-Object Version -Descending | Select-Object -First 1)
+          if ($latest.Count -gt 0 -and $version -lt $latest[0].Version) { throw "Plugin version $version is older than the latest tag $($latest[0].Tag)." }
           "tag=$tag" >> $env:GITHUB_OUTPUT
+          "commit=$env:GITHUB_SHA" >> $env:GITHUB_OUTPUT
 
       - name: Run tests
         shell: pwsh
         run: dotnet run --project .\tests\RamMacros.Tests.csproj -c Release --nologo
 
-      - name: Build and sign package
+      - name: Build unsigned package
+        shell: pwsh
+        run: |
+          $release = Join-Path $env:RUNNER_TEMP 'ram-macros-release'
+          $stage = Join-Path $release 'stage'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          dotnet publish .\ram-macros.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $stage
+          Copy-Item .\plugin.json (Join-Path $stage 'plugin.json') -Force
+          $zip = Join-Path $release 'plugin.zip'
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
+          (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content (Join-Path $release 'plugin.sha256') -NoNewline
+          Copy-Item .\plugin.json (Join-Path $release 'plugin.json') -Force
+
+      - name: Upload unsigned package for isolated signing
+        uses: actions/upload-artifact@v4
+        with:
+          name: ram-macros-package
+          path: ${{ runner.temp }}/ram-macros-release/*
+          if-no-files-found: error
+
+  sign-and-publish:
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      PLUGIN_NAME: RAM Macros
+      RAM_PLUGIN_SIGNING_KEY: ${{ secrets.RAM_PLUGIN_SIGNING_KEY }}
+      RAM_PLUGIN_SIGNING_PUBLIC_KEY: ${{ secrets.RAM_PLUGIN_SIGNING_PUBLIC_KEY }}
+
+    steps:
+      - name: Download unsigned package
+        uses: actions/download-artifact@v4
+        with:
+          name: ram-macros-package
+          path: release
+
+      - name: Sign and verify package
         shell: pwsh
         run: |
           if ([string]::IsNullOrWhiteSpace($env:RAM_PLUGIN_SIGNING_KEY)) { throw 'RAM_PLUGIN_SIGNING_KEY is required for official releases.' }
@@ -59,10 +112,8 @@ jobs:
           try {
               [IO.File]::WriteAllText($privatePath, $env:RAM_PLUGIN_SIGNING_KEY, [Text.UTF8Encoding]::new($false))
               [IO.File]::WriteAllText($publicPath, $env:RAM_PLUGIN_SIGNING_PUBLIC_KEY, [Text.UTF8Encoding]::new($false))
-              $env:RAM_PLUGIN_SIGNING_KEY = $privatePath
-              & .\build-release.ps1
-              if ($LASTEXITCODE -ne 0) { throw "Package build failed with exit code $LASTEXITCODE." }
-              if (-not (Test-Path '.\release\plugin.sig')) { throw 'The package signature was not created.' }
+              & openssl pkeyutl -sign -inkey $privatePath -in '.\release\plugin.zip' -out '.\release\plugin.sig'
+              if ($LASTEXITCODE -ne 0) { throw "Package signing failed with exit code $LASTEXITCODE." }
               & openssl pkeyutl -verify -pubin -inkey $publicPath -in '.\release\plugin.zip' -sigfile '.\release\plugin.sig'
               if ($LASTEXITCODE -ne 0) { throw 'The package signature did not verify with the configured public key.' }
           } finally {
@@ -73,6 +124,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          RELEASE_TARGET: ${{ needs.build.outputs.commit }}
         run: |
-          gh release create $env:RELEASE_TAG '.\release\plugin.json#plugin.json' '.\release\plugin.zip#plugin.zip' '.\release\plugin.sha256#plugin.sha256' '.\release\plugin.sig#plugin.sig' --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "$env:PLUGIN_NAME $env:RELEASE_TAG" --generate-notes --fail-on-no-commits
+          gh release create $env:RELEASE_TAG '.\release\plugin.json#plugin.json' '.\release\plugin.zip#plugin.zip' '.\release\plugin.sha256#plugin.sha256' '.\release\plugin.sig#plugin.sig' --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_TARGET --title "$env:PLUGIN_NAME $env:RELEASE_TAG" --generate-notes --fail-on-no-commits

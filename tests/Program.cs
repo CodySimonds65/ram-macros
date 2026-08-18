@@ -148,4 +148,50 @@ var zeroSizeWindow = new RecorderWindow("default", (nint)0x1234, 0, 0);
 zeroMetricsRecorder.Start([zeroSizeWindow]);
 Require(zeroMetricsRecorder.TryRecord(zeroSizeWindow, E(0), 0, 0, injected: false, multiWindow: false), "A keyboard event was not recorded for a zero-size window.");
 Require(new DiagnosticEntry(new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc), "info", "hello").ToString().EndsWith("[info]  hello"), "Diagnostic entry formatting did not end with the level and message.");
-Console.WriteLine("Macro sequence editor tests passed.");
+Require(InputPostSender.ToWire(E(0, MacroEventKind.Delay)) is null, "Delay events must not reach the wire.");
+Require(InputPostSender.ToWire(new MacroEvent { Kind = MacroEventKind.MouseButtonDown, Button = 1 }) is { Button: 0 }, "Button 1 (left) must map to host button 0.");
+Require(InputPostSender.ToWire(new MacroEvent { Kind = MacroEventKind.MouseButtonDown, Button = 3 }) is { Button: 2 }, "Button 3 (middle) must map to host button 2.");
+Require(InputPostSender.ToWire(new MacroEvent { Kind = MacroEventKind.MouseButtonDown, Button = 0 }) is null, "An invalid mouse button must be dropped.");
+Require(InputPostSender.ToWire(new MacroEvent { Kind = MacroEventKind.KeyDown, VirtualKey = 300, ScanCode = 400, OffsetMicroseconds = 123 }) is { VirtualKey: 255, ScanCode: 255, OffsetMicroseconds: 123 }, "Key fields must be clamped and offsets preserved.");
+var chunkSource = new List<MacroEvent>();
+for (var i = 0; i < 4500; i++) chunkSource.Add(E(i * 1000L));
+var wireChunks = InputPostSender.ChunkForWire(chunkSource, 2000);
+Require(wireChunks.Count == 3 && wireChunks[0].Length == 2000 && wireChunks[1].Length == 2000 && wireChunks[2].Length == 500, "Chunking did not split into the expected sizes.");
+Require(wireChunks[0][0].OffsetMicroseconds == 0 && wireChunks[1][0].OffsetMicroseconds == 2_000_000, "Chunk offsets were not preserved as absolute before normalization.");
+var expandedGaps = MacroSequenceEditor.ExpandGapsToDelays(editorEvents);
+Require(expandedGaps.Count == 5 && expandedGaps[1].Kind == MacroEventKind.Delay && expandedGaps[3].Kind == MacroEventKind.Delay, "Recorded gaps were not expanded into delay rows.");
+Require(expandedGaps[0].OffsetMicroseconds == 0 && expandedGaps[1].OffsetMicroseconds == 250_000 && expandedGaps[2].OffsetMicroseconds == 250_000 && expandedGaps[3].OffsetMicroseconds == 1_000_000 && expandedGaps[4].OffsetMicroseconds == 1_000_000, "Expanded delay rows did not preserve the timeline.");
+Require(MacroSequenceEditor.TotalDurationMicroseconds(expandedGaps) == MacroSequenceEditor.TotalDurationMicroseconds(editorEvents), "Gap expansion changed the total duration.");
+Require(MacroSequenceEditor.ExpandGapsToDelays([E(0), E(0)]).Count == 2, "Zero-length gaps must not produce delay rows.");
+Require(MacroSequenceEditor.ExpandGapsToDelays([E(0)]).Count == 1, "A single event must not expand.");
+var fakeDispatchCount = 0;
+var fakeTarget = new FakeMacroTarget(() => Interlocked.Increment(ref fakeDispatchCount));
+var playback = new PlaybackController(fakeTarget);
+var playbackMacro = new MacroDefinition { Events = [E(0)] };
+var playedOnce = await playback.PlayAsync(playbackMacro, ["account-a"], PlaybackMode.Once, 1, CancellationToken.None);
+Require(playedOnce.Started && playedOnce.RunCount == 1 && fakeDispatchCount == 1, "Play once did not run exactly once.");
+var playedThrice = await playback.PlayAsync(playbackMacro, ["account-a"], PlaybackMode.Repeat, 3, CancellationToken.None);
+Require(playedThrice.Started && playedThrice.RunCount == 3 && fakeDispatchCount == 4, "Play x times did not run the requested count.");
+var continuousPlay = playback.PlayAsync(playbackMacro, ["account-a"], PlaybackMode.Continuous, 1, CancellationToken.None);
+await Task.Delay(120);
+playback.Stop();
+var playedContinuous = await continuousPlay;
+Require(playedContinuous.Started && playedContinuous.Code == "stopped" && playedContinuous.RunCount >= 1, "Continuous playback did not stop cleanly.");
+var noTargets = await playback.PlayAsync(playbackMacro, [], PlaybackMode.Once, 1, CancellationToken.None);
+Require(!noTargets.Started && noTargets.Code == "no-targets", "Empty targets were not rejected.");
+var continuousGuard = playback.PlayAsync(playbackMacro, ["account-a"], PlaybackMode.WhileHeld, 1, CancellationToken.None);
+var busyResult = await playback.PlayAsync(playbackMacro, ["account-a"], PlaybackMode.Once, 1, CancellationToken.None);
+Require(!busyResult.Started && busyResult.Code == "busy", "The busy guard did not reject concurrent playback.");
+playback.Stop();
+await continuousGuard;
+Console.WriteLine("Macro playback smoke tests passed.");
+
+file sealed class FakeMacroTarget(Action onDispatch) : IBackgroundMacroTarget
+{
+    public async Task<MacroDispatchResult> DispatchAsync(string accountId, IReadOnlyList<MacroEvent> events, CancellationToken cancellationToken)
+    {
+        onDispatch();
+        await Task.Yield();
+        return new MacroDispatchResult(true, "ok", "ok", events.Count);
+    }
+}

@@ -76,6 +76,17 @@ public static class MacroSequenceEditor
         return Rebuild(items, deltas);
     }
 
+    public static IReadOnlyList<MacroEvent> ExpandGapsToDelays(IReadOnlyList<MacroEvent> events)
+    {
+        var result = events;
+        for (var i = events.Count - 2; i >= 0; i--)
+        {
+            if (events[i + 1].OffsetMicroseconds > events[i].OffsetMicroseconds)
+                result = InsertDelay(result, i, 0);
+        }
+        return result;
+    }
+
     public static long TotalDurationMicroseconds(IReadOnlyList<MacroEvent> events) =>
         events.Count == 0 ? 0 : events[^1].OffsetMicroseconds;
 

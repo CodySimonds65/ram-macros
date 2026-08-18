@@ -15,16 +15,8 @@ public sealed class SequenceRunner(IBackgroundMacroTarget target)
         foreach (var accountId in accountIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var previous = 0L;
-            var batch = new List<MacroEvent>();
-            foreach (var input in macro.Events.OrderBy(item => item.OffsetMicroseconds))
-            {
-                var delay = input.OffsetMicroseconds - previous;
-                if (delay > 0) await Task.Delay(TimeSpan.FromTicks(delay * 10), cancellationToken);
-                batch.Add(input);
-                previous = input.OffsetMicroseconds;
-            }
-            results.Add(await target.DispatchAsync(accountId, batch, cancellationToken));
+            var events = macro.Events.OrderBy(item => item.OffsetMicroseconds).ToArray();
+            results.Add(await target.DispatchAsync(accountId, events, cancellationToken));
         }
         return results;
     }

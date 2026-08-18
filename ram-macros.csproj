@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>ram-macros</AssemblyName>
     <RootNamespace>RamMacros</RootNamespace>
-    <Version>0.1.4</Version>
+    <Version>0.1.7</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <StartupObject>RamMacros.App</StartupObject>
   </PropertyGroup>

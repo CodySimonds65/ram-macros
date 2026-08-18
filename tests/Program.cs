@@ -14,6 +14,7 @@ Require(recorder.Stop().Count == 1, "The recorder lost the captured event when s
 var diagnostics = new DiagnosticsLog();
 var diagnosticCount = 0;
 diagnostics.Added += (_, _) => diagnosticCount++;
+diagnostics.Added += (_, _) => throw new InvalidOperationException("subscriber failure");
 diagnostics.Info("hook started");
 diagnostics.Warning(new string('x', 2_100));
 Require(diagnosticCount == 2 && diagnostics.Snapshot().Count == 2, "Diagnostics entries were not retained and raised.");

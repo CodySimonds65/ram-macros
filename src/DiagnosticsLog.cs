@@ -33,6 +33,12 @@ public sealed class DiagnosticsLog
             _entries.Enqueue(entry);
             while (_entries.Count > 100) _entries.Dequeue();
         }
-        Added?.Invoke(this, entry);
+        var handlers = Added?.GetInvocationList();
+        if (handlers is null) return;
+        foreach (EventHandler<DiagnosticEntry> handler in handlers)
+        {
+            try { handler(this, entry); }
+            catch { /* Logging must not fail recording or shutdown. */ }
+        }
     }
 }

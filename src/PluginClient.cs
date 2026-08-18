@@ -66,11 +66,16 @@ public sealed class PluginClient : IAsyncDisposable
         try
         {
             await _writeGate.WaitAsync().ConfigureAwait(false);
-            _writeGate.Release();
+            // Hold the gate while closing the pipe. Waiting senders wake after the
+            // release, observe the disposed flag, and can safely release the still-live
+            // semaphore. The semaphore is intentionally left undisposed for this race.
+            await _pipe.DisposeAsync().ConfigureAwait(false);
         }
         catch (ObjectDisposedException) { }
-        await _pipe.DisposeAsync().ConfigureAwait(false);
-        _writeGate.Dispose();
+        finally
+        {
+            try { _writeGate.Release(); } catch (ObjectDisposedException) { }
+        }
     }
 
     private void ThrowIfDisposed()

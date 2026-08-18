@@ -22,6 +22,20 @@ public sealed class PluginClient : IAsyncDisposable
         _capabilities = doc.RootElement.GetProperty("capabilities").EnumerateArray().Select(item => item.GetString()!).ToArray();
     }
 
+    public static string? DataDirectoryFromArgs(string[] args)
+    {
+        try
+        {
+            if (args is null) return null;
+            if (!TryParseArgs(args, out var values)) return null;
+            return values.TryGetValue("data", out var data) && !string.IsNullOrWhiteSpace(data) ? data : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public static PluginClient? FromArgs(string[] args)
     {
         try

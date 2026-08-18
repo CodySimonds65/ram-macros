@@ -38,6 +38,20 @@ public static class MacroStore
         return Migrate(bundle);
     }
 
+    public static void SaveLibrary(string path, MacroBundle bundle)
+    {
+        var temporaryPath = path + ".tmp";
+        File.WriteAllText(temporaryPath, JsonSerializer.Serialize(bundle, Json));
+        File.Move(temporaryPath, path, overwrite: true);
+    }
+
+    public static MacroBundle? LoadLibrary(string path)
+    {
+        if (!File.Exists(path)) return null;
+        var bundle = JsonSerializer.Deserialize<MacroBundle>(File.ReadAllText(path), Json);
+        return bundle is null ? null : Migrate(bundle);
+    }
+
     public static MacroBundle Migrate(MacroBundle bundle)
     {
         if (bundle.FormatMajor != 1) throw new InvalidDataException($"Unsupported macro format {bundle.FormatMajor}.");

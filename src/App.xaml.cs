@@ -10,7 +10,8 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        MainWindow = new MainWindow(ManagedAccounts, Diagnostics); MainWindow.Show();
+        var dataDirectory = PluginClient.DataDirectoryFromArgs(e.Args);
+        MainWindow = new MainWindow(ManagedAccounts, Diagnostics, dataDirectory); MainWindow.Show();
         _client = PluginClient.FromArgs(e.Args);
         if (_client is not null) _ = ConnectHostAsync(_client, Diagnostics);
         else Diagnostics.Info("Running without a launcher host pipe; standalone Roblox recording is available, while managed playback requires the launcher.");

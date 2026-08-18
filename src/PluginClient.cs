@@ -50,7 +50,8 @@ public sealed class PluginClient : IAsyncDisposable
             else if (TryGetValue(values, "token-file", out var tokenFile))
             {
                 token = File.ReadAllText(tokenFile).Trim();
-                try { File.Delete(tokenFile); } catch (IOException) { }
+                try { File.Delete(tokenFile); }
+                catch (IOException) { }
                 catch (UnauthorizedAccessException) { }
             }
             else return null;

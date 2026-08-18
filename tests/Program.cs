@@ -10,6 +10,13 @@ Require(recorder.TryRecord(new RecorderWindow("default", (nint)42, 100, 100), ne
 Require(recorder.Snapshot().Count == 1, "The recorder snapshot did not expose the captured event.");
 Require(!recorder.TryRecord(new RecorderWindow("default", (nint)42, 100, 100), new MacroEvent { Kind = MacroEventKind.KeyUp, VirtualKey = 65 }, 0, 0, injected: true, multiWindow: false), "An injected event was recorded.");
 Require(recorder.Stop().Count == 1, "The recorder lost the captured event when stopping.");
+var diagnostics = new DiagnosticsLog();
+var diagnosticCount = 0;
+diagnostics.Added += (_, _) => diagnosticCount++;
+diagnostics.Info("hook started");
+diagnostics.Warning(new string('x', 2_100));
+Require(diagnosticCount == 2 && diagnostics.Snapshot().Count == 2, "Diagnostics entries were not retained and raised.");
+Require(diagnostics.Snapshot()[1].Message.Length == 2_000, "Diagnostic messages were not bounded.");
 var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".ramacro");
 try
 {

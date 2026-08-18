@@ -6,22 +6,30 @@ public partial class App : Application
 {
     private PluginClient? _client;
     public ManagedAccountRegistry ManagedAccounts { get; } = new();
+    public DiagnosticsLog Diagnostics { get; } = new();
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        MainWindow = new MainWindow(ManagedAccounts); MainWindow.Show();
+        MainWindow = new MainWindow(ManagedAccounts, Diagnostics); MainWindow.Show();
         _client = PluginClient.FromArgs(e.Args);
-        if (_client is not null) _ = ConnectHostAsync(_client);
+        if (_client is not null) _ = ConnectHostAsync(_client, Diagnostics);
+        else Diagnostics.Warning("Running without a launcher host pipe; managed-account input is unavailable.");
     }
-    private static async Task ConnectHostAsync(PluginClient client)
+    private static async Task ConnectHostAsync(PluginClient client, DiagnosticsLog diagnostics)
     {
         using var shutdown = new CancellationTokenSource();
         var heartbeat = Task.CompletedTask;
         var accountRefresh = Task.CompletedTask;
+        EventHandler<DiagnosticEntry>? forwardDiagnostic = null;
         try
         {
+            diagnostics.Info("Connecting to the launcher plugin host...");
             await client.ConnectAsync();
+            diagnostics.Info("Launcher plugin host accepted the connection.");
+            forwardDiagnostic = (_, entry) => _ = SendDiagnosticAsync(client, entry, shutdown.Token);
+            diagnostics.Added += forwardDiagnostic;
             await client.SendAsync("action.register", new { actionId = "io.github.codysimonds65.ram.macros.run", displayName = "Run RAM macro", description = "Run a named macro on selected managed accounts without focus changes.", argumentSchemaJson = "{\"type\":\"object\",\"properties\":{\"macroId\":{\"type\":\"string\"}}}", requiredCapabilities = new[] { "host.input.background" } });
+            diagnostics.Info("Registered RAM Macros action bridge.");
             heartbeat = SendHeartbeatsAsync(client, shutdown.Token);
             accountRefresh = RefreshAccountsAsync(client, shutdown.Token);
             while (true)
@@ -36,14 +44,28 @@ public partial class App : Application
                 }
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            diagnostics.Error($"Host connection stopped: {ex.Message}");
+        }
         finally
         {
             shutdown.Cancel();
+            if (forwardDiagnostic is not null) diagnostics.Added -= forwardDiagnostic;
             try { await Task.WhenAll(heartbeat, accountRefresh); }
             catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException) { }
             await client.DisposeAsync();
+            diagnostics.Info("Launcher plugin host connection closed.");
         }
+    }
+
+    private static async Task SendDiagnosticAsync(PluginClient client, DiagnosticEntry entry, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await client.SendAsync("diagnostic.log", new { level = entry.Level, message = entry.Message, utc = entry.Utc }, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException) { }
     }
     private static async Task RefreshAccountsAsync(PluginClient client, CancellationToken cancellationToken)
     {

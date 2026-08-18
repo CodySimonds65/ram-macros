@@ -4,7 +4,7 @@
     <Grid.ColumnDefinitions><ColumnDefinition Width="310"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
     <Border Grid.Column="0" Background="#11141B" BorderBrush="#272D3A" BorderThickness="1" CornerRadius="14" Padding="14">
       <DockPanel>
-        <StackPanel DockPanel.Dock="Bottom" Margin="0,14,0,0"><Button Content="＋  New macro" Click="NewMacro_Click" Background="#7C5CFC" Foreground="White" Padding="12,8"/><Button Content="Import bundle" Click="Import_Click" Margin="0,8,0,0" Background="#1D2230" Foreground="#F5F7FA" Padding="12,8"/><Button Content="Export bundle" Click="Export_Click" Margin="0,8,0,0" Background="#1D2230" Foreground="#F5F7FA" Padding="12,8"/></StackPanel>
+        <StackPanel DockPanel.Dock="Bottom" Margin="0,14,0,0"><Button Content="＋  New macro" Click="NewMacro_Click" Background="#7C5CFC" Foreground="White" Padding="12,8"/><Button Content="Import bundle" Click="Import_Click" Margin="0,8,0,0" Background="#1D2230" Foreground="#F5F7FA" Padding="12,8"/><Button Content="Save bundle" Click="Export_Click" Margin="0,8,0,0" Background="#1D2230" Foreground="#F5F7FA" Padding="12,8"/></StackPanel>
         <StackPanel><TextBlock Text="MACRO LIBRARY" FontSize="11" Foreground="#929AAD" FontWeight="SemiBold"/><TextBox x:Name="SearchBox" Margin="0,8,0,10" Background="#171B24" Foreground="#F5F7FA" BorderBrush="#272D3A" CaretBrush="#F5F7FA" TextChanged="SearchBox_TextChanged"/><ListBox x:Name="MacroList" ItemContainerStyle="{StaticResource DarkListBoxItem}" SelectionChanged="MacroList_SelectionChanged" Background="#171B24" Foreground="#F5F7FA" BorderBrush="#272D3A">
           <ListBox.ItemTemplate>
             <DataTemplate>

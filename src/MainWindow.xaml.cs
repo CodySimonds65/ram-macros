@@ -258,6 +258,11 @@ public partial class MainWindow : Window
         if ((sender as Button)?.Tag is MacroDefinition macro) RenameMacro(macro);
     }
 
+    private void RemoveMacroRow_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as Button)?.Tag is MacroDefinition macro) RemoveMacro(macro);
+    }
+
     private void RenameContext_Click(object sender, RoutedEventArgs e)
     {
         if (GetContextMacro(sender) is { } macro) RenameMacro(macro);

@@ -19,7 +19,11 @@ public partial class MainWindow : Window
     private nint _recordingWindow;
     private nint _windowHandle;
     private int _eventRefreshPending;
+    private int _capturedInputCount;
+    private int _ignoredInjectedCount;
+    private int _rejectedEventCount;
     private DateTime _lastUnmanagedDiagnosticUtc;
+    private DateTime _lastRejectedDiagnosticUtc;
 
     public MainWindow(ManagedAccountRegistry? managedAccounts = null, DiagnosticsLog? diagnostics = null)
     {
@@ -108,6 +112,10 @@ public partial class MainWindow : Window
 
         _recording = true;
         _recordingWindow = nint.Zero;
+        _capturedInputCount = 0;
+        _ignoredInjectedCount = 0;
+        _rejectedEventCount = 0;
+        _lastRejectedDiagnosticUtc = DateTime.MinValue;
         _recorder.Start([]);
         try
         {
@@ -135,9 +143,17 @@ public partial class MainWindow : Window
     private void HandleCapturedInput(CapturedInput captured)
     {
         if (!_recording || captured.WindowHandle == _windowHandle) return;
+        var capturedCount = Interlocked.Increment(ref _capturedInputCount);
+        if (capturedCount == 1)
+            Diagnostic($"Input hook observed {captured.Event.Kind} on foreground HWND 0x{captured.WindowHandle.ToInt64():X}.");
         // Filter before binding a target. Injected input must never be able to
         // select a window or enter the recorded sequence.
-        if (captured.Injected) return;
+        if (captured.Injected)
+        {
+            var ignored = Interlocked.Increment(ref _ignoredInjectedCount);
+            if (ignored == 1) Diagnostic("Ignored injected input from the recording hook.");
+            return;
+        }
         if (!_managedAccounts.TryResolve(captured.WindowHandle, out var account))
         {
             if (DateTime.UtcNow - _lastUnmanagedDiagnosticUtc > TimeSpan.FromSeconds(2))
@@ -170,6 +186,15 @@ public partial class MainWindow : Window
             QueueEventListRefresh();
             var count = _recorder.Snapshot().Count;
             if (count == 1 || count % 25 == 0) Diagnostic($"Captured {count} event(s) for {account.Label}.");
+        }
+        else
+        {
+            var rejected = Interlocked.Increment(ref _rejectedEventCount);
+            if (rejected == 1 || DateTime.UtcNow - _lastRejectedDiagnosticUtc >= TimeSpan.FromSeconds(2))
+            {
+                _lastRejectedDiagnosticUtc = DateTime.UtcNow;
+                DiagnosticWarning($"Input hook event was rejected for {account.Label}; check foreground/window bounds.");
+            }
         }
     }
 
@@ -211,7 +236,7 @@ public partial class MainWindow : Window
         }
         RefreshEventList();
         StatusText.Text = $"Recording stopped.\n{events.Count} event(s) captured.";
-        Diagnostic($"Recording stopped with {events.Count} event(s).");
+        Diagnostic($"Recording stopped with {events.Count} event(s); hook observed {_capturedInputCount}, ignored {_ignoredInjectedCount} injected, rejected {_rejectedEventCount}.");
     }
 
     private void RefreshEventList()

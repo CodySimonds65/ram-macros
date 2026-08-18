@@ -131,10 +131,38 @@ jobs:
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
           RELEASE_TARGET: ${{ needs.build.outputs.commit }}
         run: |
-          & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
-              "Release $env:RELEASE_TAG already exists; treating this retry as successful." >> $env:GITHUB_STEP_SUMMARY
-              exit 0
+          function Get-ReleaseMetadata {
+              $json = & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json tagName,targetCommitish,isDraft,isPrerelease,assets 2>$null
+              if ($LASTEXITCODE -ne 0) { return $null }
+              try { return ($json | ConvertFrom-Json) } catch { throw "Existing release metadata is not valid JSON." }
+          }
+
+          function Test-CompleteRelease {
+              param([object]$Release)
+              if ($null -eq $Release -or $Release.tagName -ne $env:RELEASE_TAG -or $Release.isDraft -or $Release.isPrerelease) { return $false }
+              if ([string]::IsNullOrWhiteSpace([string]$Release.targetCommitish) -or $Release.targetCommitish -ine $env:RELEASE_TARGET) { return $false }
+              $expected = @{
+                  'plugin.json' = 'positive'
+                  'plugin.zip' = 'positive'
+                  'plugin.sha256' = 'sha256'
+                  'plugin.sig' = 'signature'
+              }
+              foreach ($name in $expected.Keys) {
+                  $assets = @($Release.assets | Where-Object { $_.name -eq $name })
+                  if ($assets.Count -ne 1 -or $assets[0].state -ne 'uploaded' -or [int64]$assets[0].size -le 0 -or [string]$assets[0].digest -notmatch '^sha256:[0-9a-f]{64}$') { return $false }
+                  if ($expected[$name] -eq 'sha256' -and [int64]$assets[0].size -ne 64) { return $false }
+                  if ($expected[$name] -eq 'signature' -and [int64]$assets[0].size -ne 64) { return $false }
+              }
+              return $true
+          }
+
+          $existing = Get-ReleaseMetadata
+          if ($null -ne $existing) {
+              if (Test-CompleteRelease $existing) {
+                  "Release $env:RELEASE_TAG already exists with the expected target and assets; treating this retry as successful." >> $env:GITHUB_STEP_SUMMARY
+                  exit 0
+              }
+              throw "Release $env:RELEASE_TAG exists but is incomplete or targets the wrong commit; refusing to mask a partial publication."
           }
 
           $createOutput = & gh release create $env:RELEASE_TAG '.\release\plugin.json#plugin.json' '.\release\plugin.zip#plugin.zip' '.\release\plugin.sha256#plugin.sha256' '.\release\plugin.sig#plugin.sig' --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_TARGET --title "$env:PLUGIN_NAME $env:RELEASE_TAG" --generate-notes --fail-on-no-commits 2>&1
@@ -144,9 +172,9 @@ jobs:
 
           # A concurrent retry may have won the create race. Re-check before
           # failing so the release remains idempotent.
-          & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
-              "Release $env:RELEASE_TAG was created by a concurrent retry; treating this run as successful." >> $env:GITHUB_STEP_SUMMARY
+          $existing = Get-ReleaseMetadata
+          if ($null -ne $existing -and (Test-CompleteRelease $existing)) {
+              "Release $env:RELEASE_TAG was created by a concurrent retry with the expected target and assets; treating this run as successful." >> $env:GITHUB_STEP_SUMMARY
               exit 0
           }
           throw "GitHub release creation failed with exit code $createExitCode."

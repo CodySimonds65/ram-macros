@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace RamMacros;
 
-public enum MacroEventKind { KeyDown, KeyUp, MouseMove, MouseButtonDown, MouseButtonUp, MouseWheel }
+public enum MacroEventKind { KeyDown, KeyUp, MouseMove, MouseButtonDown, MouseButtonUp, MouseWheel, Delay }
 
 public sealed record MacroEvent
 {

@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -32,6 +33,9 @@ public partial class MainWindow : Window
     private DateTime _lastUnmanagedDiagnosticUtc;
     private DateTime _lastRejectedDiagnosticUtc;
     private bool _standaloneRecording;
+    private int _recordHotkeyVk = 0x78;
+
+    private static string SettingsPath => Path.Combine(AppContext.BaseDirectory, "settings.json");
 
     public MainWindow(ManagedAccountRegistry? managedAccounts = null, DiagnosticsLog? diagnostics = null)
     {
@@ -51,6 +55,36 @@ public partial class MainWindow : Window
             },
             NativeWindowMetrics.IsSameWindowTree);
         SourceInitialized += (_, _) => _windowHandle = new WindowInteropHelper(this).Handle;
+        LoadSettings();
+        HotkeyButton.Content = $"Hotkey: {KeyName(_recordHotkeyVk)}";
+    }
+
+    private void LoadSettings()
+    {
+        try
+        {
+            if (!File.Exists(SettingsPath)) return;
+            using var document = JsonDocument.Parse(File.ReadAllText(SettingsPath));
+            if (document.RootElement.TryGetProperty("recordHotkey", out var hotkey) &&
+                hotkey.TryGetInt32(out var vk) && vk is >= 1 and <= 255)
+                _recordHotkeyVk = vk;
+        }
+        catch
+        {
+            // Settings are best-effort; defaults apply when unreadable.
+        }
+    }
+
+    private void SaveSettings()
+    {
+        try
+        {
+            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(new { recordHotkey = _recordHotkeyVk }));
+        }
+        catch
+        {
+            // Settings are best-effort; the hotkey still applies for this session.
+        }
     }
 
     private void NewMacro_Click(object sender, RoutedEventArgs e)
@@ -223,6 +257,40 @@ public partial class MainWindow : Window
         }
     }
 
+    private void Hotkey_Click(object sender, RoutedEventArgs e)
+    {
+        if (_recording) { StatusText.Text = "Stop recording before changing the hotkey."; return; }
+        var capture = new TextBox { Text = KeyName(_recordHotkeyVk), MinWidth = 260, Padding = new Thickness(8, 5, 8, 5), Background = new SolidColorBrush(Color.FromRgb(23, 27, 36)), Foreground = System.Windows.Media.Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(39, 45, 58)), CaretBrush = System.Windows.Media.Brushes.White, Margin = new Thickness(0, 0, 0, 6) };
+        var selectedVk = _recordHotkeyVk;
+        capture.PreviewKeyDown += (_, keyArgs) =>
+        {
+            var key = keyArgs.Key == Key.System ? keyArgs.SystemKey : keyArgs.Key;
+            if (key is Key.LeftCtrl or Key.RightCtrl or Key.LeftShift or Key.RightShift or Key.LeftAlt or Key.RightAlt) return;
+            var vk = KeyInterop.VirtualKeyFromKey(key);
+            if (vk == 0) return;
+            selectedVk = vk;
+            capture.Text = KeyName(vk);
+            keyArgs.Handled = true;
+        };
+        var save = new Button { Content = "Save", IsDefault = true, Padding = new Thickness(16, 6, 16, 6), Background = System.Windows.Media.Brushes.MediumPurple, Foreground = System.Windows.Media.Brushes.White };
+        var cancel = new Button { Content = "Cancel", IsCancel = true, Padding = new Thickness(16, 6, 16, 6), Margin = new Thickness(8, 0, 0, 0), Background = new SolidColorBrush(Color.FromRgb(29, 34, 48)), Foreground = System.Windows.Media.Brushes.White };
+        var actionButtons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+        actionButtons.Children.Add(save); actionButtons.Children.Add(cancel);
+        var panel = new StackPanel { Margin = new Thickness(18) };
+        panel.Children.Add(new TextBlock { Text = "Recording hotkey", Foreground = System.Windows.Media.Brushes.White, Margin = new Thickness(0, 0, 0, 8) });
+        panel.Children.Add(new TextBlock { Text = "Press a key below, then Save. The hotkey starts and stops recording globally.", Foreground = new SolidColorBrush(Color.FromRgb(146, 154, 173)), FontSize = 11, Margin = new Thickness(0, 0, 0, 4) });
+        panel.Children.Add(capture); panel.Children.Add(actionButtons);
+        var dialog = new Window { Title = "Change recording hotkey", Content = panel, Width = 380, SizeToContent = SizeToContent.Height, ResizeMode = ResizeMode.NoResize, Owner = this, WindowStartupLocation = WindowStartupLocation.CenterOwner, Background = new SolidColorBrush(Color.FromRgb(17, 20, 27)), Foreground = System.Windows.Media.Brushes.White };
+        WindowAppearance.Apply(dialog);
+        save.Click += (_, _) => dialog.DialogResult = true;
+        capture.Focus();
+        if (dialog.ShowDialog() != true) return;
+        _recordHotkeyVk = selectedVk;
+        HotkeyButton.Content = $"Hotkey: {KeyName(_recordHotkeyVk)}";
+        SaveSettings();
+        Diagnostic($"Recording hotkey set to {KeyName(_recordHotkeyVk)}.");
+    }
+
     private void Record_Click(object sender, RoutedEventArgs e)
     {
         if (_selected is null)
@@ -236,6 +304,12 @@ public partial class MainWindow : Window
             StopRecording();
             return;
         }
+        StartRecording();
+    }
+
+    private void StartRecording()
+    {
+        if (_recording || _selected is null) return;
 
         _panelMode = PanelModeCheck.IsChecked == true;
         var foreground = NativeWindowMetrics.GetForegroundWindow();
@@ -268,6 +342,7 @@ public partial class MainWindow : Window
         }
         try
         {
+            _inputCapture.StopHotkey = (uint)_recordHotkeyVk;
             _inputCapture.Start(HandleCapturedInput, _windowHandle, _panelMode);
             _inputCapture.StopRequested = OnStopHotkey;
         }
@@ -283,15 +358,17 @@ public partial class MainWindow : Window
         }
         RecordButton.Content = "■  Stop recording";
         PanelModeCheck.IsEnabled = false;
+        HotkeyButton.IsEnabled = false;
+        var hotkeyName = KeyName(_recordHotkeyVk);
         if (_panelMode)
         {
             FooterText.Text = "Panel mode: keystrokes typed with the panel focused are recorded; mouse over the panel is ignored.";
-            StatusText.Text = "Recording panel input...\nType keys with the panel focused; F9 stops.";
-            Diagnostic("Recording panel input: keystrokes typed with the panel focused will be recorded. Mouse over the panel is ignored; F9 stops.");
+            StatusText.Text = $"Recording panel input...\nType keys with the panel focused; {hotkeyName} stops.";
+            Diagnostic($"Recording panel input: keystrokes typed with the panel focused will be recorded. Mouse over the panel is ignored; {hotkeyName} stops.");
         }
         else
         {
-            FooterText.Text = "Recording background input. The panel is minimized; F9 stops and restores.";
+            FooterText.Text = $"Recording background input. The panel is minimized; {hotkeyName} stops and restores.";
             StatusText.Text = foreground == _windowHandle
                 ? "Recording armed. Activate a managed Roblox window; events will appear here."
                 : "Recording managed window input...\nTarget will bind to the active Roblox client.";
@@ -300,7 +377,7 @@ public partial class MainWindow : Window
                 : "Recording started with a Roblox client foreground.");
             _minimizedForRecording = true;
             WindowState = WindowState.Minimized;
-            Diagnostic("Recording started; the panel is minimized. Press F9 to stop and restore.");
+            Diagnostic($"Recording started; the panel is minimized. Press {hotkeyName} to stop and restore.");
         }
     }
 
@@ -419,9 +496,16 @@ public partial class MainWindow : Window
 
     private void OnStopHotkey()
     {
-        _inputCapture.StopRequested = null;
-        _inputCapture.Stop();
-        Dispatcher.BeginInvoke(DispatcherPriority.Background, StopRecording);
+        if (_recording)
+        {
+            _inputCapture.StopRequested = null;
+            _inputCapture.Stop();
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, StopRecording);
+        }
+        else
+        {
+            StartRecording();
+        }
     }
 
     private void StopRecording()
@@ -440,6 +524,7 @@ public partial class MainWindow : Window
         }
         RecordButton.Content = "●  Record";
         PanelModeCheck.IsEnabled = true;
+        HotkeyButton.IsEnabled = true;
         FooterText.Text = "Background-safe recording: the panel never steals focus from the game.";
         if (_selected is not null)
         {
@@ -466,13 +551,15 @@ public partial class MainWindow : Window
     {
         var events = _recording ? _recorder.Snapshot() : _selected?.Events ?? [];
         var rows = new List<EventRow>(events.Count);
+        long previousOffset = 0;
         for (var i = 0; i < events.Count; i++)
         {
             var item = events[i];
             var delayText = i + 1 < events.Count
                 ? ((events[i + 1].OffsetMicroseconds - item.OffsetMicroseconds) / 1000L).ToString()
                 : null;
-            rows.Add(new EventRow(i, $"{i + 1}.", item, BadgeFor(item), BadgeBrushFor(item), FormatEventDetail(item), delayText));
+            rows.Add(new EventRow(i, $"{i + 1}.", item, BadgeFor(item), BadgeBrushFor(item), FormatEventDetail(item, item.OffsetMicroseconds - previousOffset), delayText));
+            previousOffset = item.OffsetMicroseconds;
         }
         EventList.ItemsSource = rows;
         EventSummaryText.Text = events.Count == 0
@@ -487,6 +574,7 @@ public partial class MainWindow : Window
         MacroEventKind.MouseButtonDown or MacroEventKind.MouseButtonUp => "BTN",
         MacroEventKind.MouseWheel => "WHEEL",
         MacroEventKind.MouseMove => "MOVE",
+        MacroEventKind.Delay => "DELAY",
         _ => "?"
     };
 
@@ -494,6 +582,7 @@ public partial class MainWindow : Window
     private static readonly Brush ButtonBadgeBrush = new SolidColorBrush(Color.FromRgb(0x4C, 0xC3, 0x8A));
     private static readonly Brush WheelBadgeBrush = new SolidColorBrush(Color.FromRgb(0xF0, 0xA9, 0x4C));
     private static readonly Brush MoveBadgeBrush = new SolidColorBrush(Color.FromRgb(0x92, 0x9A, 0xAD));
+    private static readonly Brush DelayBadgeBrush = new SolidColorBrush(Color.FromRgb(0x6C, 0xA6, 0xE8));
 
     private static Brush BadgeBrushFor(MacroEvent item) => item.Kind switch
     {
@@ -501,10 +590,11 @@ public partial class MainWindow : Window
         MacroEventKind.MouseButtonDown or MacroEventKind.MouseButtonUp => ButtonBadgeBrush,
         MacroEventKind.MouseWheel => WheelBadgeBrush,
         MacroEventKind.MouseMove => MoveBadgeBrush,
+        MacroEventKind.Delay => DelayBadgeBrush,
         _ => MoveBadgeBrush
     };
 
-    private static string FormatEventDetail(MacroEvent item) => item.Kind switch
+    private static string FormatEventDetail(MacroEvent item, long delayBeforeMicroseconds) => item.Kind switch
     {
         MacroEventKind.KeyDown => $"{KeyName(item.VirtualKey)} down",
         MacroEventKind.KeyUp => $"{KeyName(item.VirtualKey)} up",
@@ -512,6 +602,7 @@ public partial class MainWindow : Window
         MacroEventKind.MouseButtonUp => $"{(item.Button == 1 ? "Left" : item.Button == 2 ? "Right" : "Middle")} click up",
         MacroEventKind.MouseWheel => $"Wheel {(item.WheelDelta >= 0 ? "+" : "")}{item.WheelDelta}",
         MacroEventKind.MouseMove => $"Move ({item.NormalizedX:P0}, {item.NormalizedY:P0})",
+        MacroEventKind.Delay => $"Delay {delayBeforeMicroseconds / 1000L} ms",
         _ => item.Kind.ToString()
     };
 
@@ -566,6 +657,17 @@ public partial class MainWindow : Window
         var item = new MacroEvent { Kind = MacroEventKind.KeyDown, VirtualKey = 0x41, ScanCode = 0x1E };
         ApplyEditedEvents(MacroSequenceEditor.Insert(_selected.Events, _selected.Events.Count, item));
         Diagnostic("Inserted a key-down event.");
+    }
+
+    private void InsertDelay_Click(object sender, RoutedEventArgs e)
+    {
+        if (_recording) { StatusText.Text = "Stop recording before editing the sequence."; return; }
+        if (_selected is null) return;
+        var afterIndex = EventList.SelectedItem is EventRow row ? row.Index : _selected.Events.Count - 1;
+        if (afterIndex < 0) afterIndex = 0;
+        var edited = MacroSequenceEditor.InsertDelay(_selected.Events, afterIndex);
+        ApplyEditedEvents(edited);
+        Diagnostic("Inserted a delay between events; double-click it to set the pause length.");
     }
 
     private void ClearEvents_Click(object sender, RoutedEventArgs e)
@@ -698,6 +800,11 @@ public partial class MainWindow : Window
                 panel.Children.Add(new TextBlock { Text = "Wheel delta (e.g. 120 or -120)", Foreground = new SolidColorBrush(Color.FromRgb(146, 154, 173)), FontSize = 11, Margin = new Thickness(0, 0, 0, 4) });
                 panel.Children.Add(wheel);
                 break;
+            case MacroEventKind.Delay:
+                var delay = new TextBox { Text = DelayValueFor(events, index).ToString(), MinWidth = 120, Padding = new Thickness(8, 5, 8, 5), Background = new SolidColorBrush(Color.FromRgb(23, 27, 36)), Foreground = System.Windows.Media.Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(39, 45, 58)), CaretBrush = System.Windows.Media.Brushes.White, Margin = new Thickness(0, 0, 0, 6) };
+                panel.Children.Add(new TextBlock { Text = "Pause length in milliseconds", Foreground = new SolidColorBrush(Color.FromRgb(146, 154, 173)), FontSize = 11, Margin = new Thickness(0, 0, 0, 4) });
+                panel.Children.Add(delay);
+                break;
             default:
                 return;
         }
@@ -712,8 +819,21 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog() != true) return;
         if (item.Kind == MacroEventKind.MouseWheel && panel.Children.OfType<TextBox>().FirstOrDefault() is { } wheelBox && int.TryParse(wheelBox.Text, out var wheelDelta))
             edited = item with { WheelDelta = wheelDelta };
+        if (item.Kind == MacroEventKind.Delay)
+        {
+            if (panel.Children.OfType<TextBox>().FirstOrDefault() is { } delayBox && long.TryParse(delayBox.Text, out var delayMs) && delayMs >= 0)
+                ApplyEditedEvents(MacroSequenceEditor.SetDelay(events, index, (int)Math.Min(delayMs, int.MaxValue)));
+            return;
+        }
         ApplyEditedEvents(MacroSequenceEditor.UpdateEvent(events, index, edited));
         Diagnostic($"Edited event {index + 1} ({edited.Kind}).");
+    }
+
+    private static long DelayValueFor(IReadOnlyList<MacroEvent> events, int index)
+    {
+        if (index < 0 || index >= events.Count) return 0;
+        var previous = index > 0 ? events[index - 1].OffsetMicroseconds : 0;
+        return Math.Max(0, (events[index].OffsetMicroseconds - previous) / 1000L);
     }
 
     private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject

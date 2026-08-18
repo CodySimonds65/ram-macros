@@ -202,13 +202,26 @@ jobs:
               }
           }
 
+          function Repair-Release {
+              param([object]$Release)
+              if ($null -eq $Release -or $Release.tagName -ne $env:RELEASE_TAG -or $Release.isDraft -or $Release.isPrerelease -or [string]::IsNullOrWhiteSpace([string]$Release.targetCommitish) -or $Release.targetCommitish -ine $env:RELEASE_TARGET) {
+                  throw "Existing release $env:RELEASE_TAG has the wrong target or publication state; refusing to overwrite it."
+              }
+              & gh release upload $env:RELEASE_TAG '.\release\plugin.json' '.\release\plugin.zip' '.\release\plugin.sha256' '.\release\plugin.sig' --repo $env:GITHUB_REPOSITORY --clobber *> $null
+              if ($LASTEXITCODE -ne 0) { throw "Repair upload for release $env:RELEASE_TAG failed with exit code $LASTEXITCODE." }
+              $repaired = Get-ReleaseMetadata
+              if ($null -eq $repaired -or -not (Test-CompleteRelease $repaired)) { throw "Release $env:RELEASE_TAG remains incomplete after repair." }
+          }
+
           $existing = Get-ReleaseMetadata
           if ($null -ne $existing) {
               if (Test-CompleteRelease $existing) {
                   "Release $env:RELEASE_TAG already exists with the expected target and assets; treating this retry as successful." >> $env:GITHUB_STEP_SUMMARY
                   exit 0
               }
-              throw "Release $env:RELEASE_TAG exists but is incomplete or targets the wrong commit; refusing to mask a partial publication."
+              Repair-Release $existing
+              "Release $env:RELEASE_TAG was incomplete; assets were repaired and verified." >> $env:GITHUB_STEP_SUMMARY
+              exit 0
           }
 
           $createOutput = & gh release create $env:RELEASE_TAG '.\release\plugin.json#plugin.json' '.\release\plugin.zip#plugin.zip' '.\release\plugin.sha256#plugin.sha256' '.\release\plugin.sig#plugin.sig' --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_TARGET --title "$env:PLUGIN_NAME $env:RELEASE_TAG" --generate-notes --fail-on-no-commits 2>&1
@@ -219,8 +232,13 @@ jobs:
           # A concurrent retry may have won the create race. Re-check before
           # failing so the release remains idempotent.
           $existing = Get-ReleaseMetadata
-          if ($null -ne $existing -and (Test-CompleteRelease $existing)) {
-              "Release $env:RELEASE_TAG was created by a concurrent retry with the expected target and assets; treating this run as successful." >> $env:GITHUB_STEP_SUMMARY
+          if ($null -ne $existing) {
+              if (Test-CompleteRelease $existing) {
+                  "Release $env:RELEASE_TAG was created by a concurrent retry with the expected target and assets; treating this run as successful." >> $env:GITHUB_STEP_SUMMARY
+                  exit 0
+              }
+              Repair-Release $existing
+              "Release $env:RELEASE_TAG was repaired after a concurrent create race." >> $env:GITHUB_STEP_SUMMARY
               exit 0
           }
           throw "GitHub release creation failed with exit code $createExitCode."

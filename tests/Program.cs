@@ -61,3 +61,70 @@ try
 }
 finally { if (File.Exists(path)) File.Delete(path); }
 Console.WriteLine("RAM Macros tests passed.");
+static MacroEvent E(long offsetUs, MacroEventKind kind = MacroEventKind.KeyDown) => new MacroEvent { OffsetMicroseconds = offsetUs, Kind = kind, VirtualKey = 65 };
+static void RequireMonotonic(IReadOnlyList<MacroEvent> items)
+{
+    long previous = 0;
+    foreach (var item in items)
+    {
+        Require(item.OffsetMicroseconds >= previous, "Macro sequence offsets are not monotonic.");
+        previous = item.OffsetMicroseconds;
+    }
+}
+var editorEvents = new MacroEvent[] { E(0), E(250_000) with { VirtualKey = 66 }, E(1_000_000) with { VirtualKey = 67 } };
+var delayed = MacroSequenceEditor.SetDelay(editorEvents, 1, 500);
+Require(delayed[0].OffsetMicroseconds == 0 && delayed[1].OffsetMicroseconds == 500_000 && delayed[2].OffsetMicroseconds == 1_250_000, "SetDelay did not replace the delta at the requested index and shift later offsets.");
+RequireMonotonic(delayed);
+var firstDelay = MacroSequenceEditor.SetDelay(editorEvents, 0, 100);
+Require(firstDelay[0].OffsetMicroseconds == 100_000 && firstDelay[1].OffsetMicroseconds == 350_000 && firstDelay[2].OffsetMicroseconds == 1_100_000, "SetDelay did not apply the delay to the first delta.");
+RequireMonotonic(firstDelay);
+var clampedDelay = MacroSequenceEditor.SetDelay(editorEvents, 1, -500);
+Require(clampedDelay[0].OffsetMicroseconds == 0 && clampedDelay[1].OffsetMicroseconds == 0 && clampedDelay[2].OffsetMicroseconds == 750_000, "Negative delays were not clamped to zero.");
+RequireMonotonic(clampedDelay);
+Require(ReferenceEquals(MacroSequenceEditor.SetDelay(editorEvents, 3, 100), editorEvents), "An out-of-range SetDelay index did not return the input unchanged.");
+var movedForward = MacroSequenceEditor.Move(editorEvents, 0, 2);
+Require(movedForward[0].VirtualKey == 66 && movedForward[1].VirtualKey == 67 && movedForward[2].VirtualKey == 65, "Move did not relocate the event to the requested index.");
+Require(movedForward[0].OffsetMicroseconds == 250_000 && movedForward[1].OffsetMicroseconds == 1_000_000 && movedForward[2].OffsetMicroseconds == 1_000_000, "Move did not relocate the moved delta to the end of the sequence.");
+RequireMonotonic(movedForward);
+var movedBack = MacroSequenceEditor.Move(editorEvents, 2, 0);
+Require(movedBack[0].VirtualKey == 67 && movedBack[1].VirtualKey == 65 && movedBack[2].VirtualKey == 66, "Move did not relocate the event to the front.");
+Require(movedBack[0].OffsetMicroseconds == 750_000 && movedBack[1].OffsetMicroseconds == 750_000 && movedBack[2].OffsetMicroseconds == 1_000_000, "Move did not relocate the moved delta to the front of the sequence.");
+RequireMonotonic(movedBack);
+Require(ReferenceEquals(MacroSequenceEditor.Move(editorEvents, 1, 1), editorEvents), "A no-op Move did not return the input unchanged.");
+var removed = MacroSequenceEditor.RemoveAt(editorEvents, 1);
+Require(removed.Count == 2 && removed[0].VirtualKey == 65 && removed[1].VirtualKey == 67, "RemoveAt did not drop the requested event.");
+Require(removed[0].OffsetMicroseconds == 0 && removed[1].OffsetMicroseconds == 750_000, "RemoveAt did not keep the following event's delta.");
+RequireMonotonic(removed);
+Require(ReferenceEquals(MacroSequenceEditor.RemoveAt(editorEvents, 5), editorEvents), "An out-of-range RemoveAt index did not return the input unchanged.");
+var inserted = MacroSequenceEditor.Insert(editorEvents, 1, E(0) with { VirtualKey = 88 });
+Require(inserted[0].VirtualKey == 65 && inserted[1].VirtualKey == 88 && inserted[2].VirtualKey == 66 && inserted[3].VirtualKey == 67, "Insert did not place the new event at the requested index.");
+Require(inserted[0].OffsetMicroseconds == 0 && inserted[1].OffsetMicroseconds == 0 && inserted[2].OffsetMicroseconds == 250_000 && inserted[3].OffsetMicroseconds == 1_000_000, "Insert did not give the new event a zero delta while preserving later deltas.");
+RequireMonotonic(inserted);
+var appended = MacroSequenceEditor.Insert(editorEvents, 3, E(0));
+Require(appended[2].OffsetMicroseconds == 1_000_000 && appended[3].OffsetMicroseconds == 1_000_000, "Insert at the end did not append with a zero delta.");
+RequireMonotonic(appended);
+Require(ReferenceEquals(MacroSequenceEditor.Insert(editorEvents, 9, E(0)), editorEvents), "An out-of-range Insert index did not return the input unchanged.");
+var updated = MacroSequenceEditor.UpdateEvent(editorEvents, 1, E(999, MacroEventKind.MouseWheel) with { WheelDelta = 120 });
+Require(updated[1].Kind == MacroEventKind.MouseWheel && updated[1].WheelDelta == 120, "UpdateEvent did not replace the event payload.");
+Require(updated[0].OffsetMicroseconds == 0 && updated[1].OffsetMicroseconds == 250_000 && updated[2].OffsetMicroseconds == 1_000_000, "UpdateEvent did not preserve the existing offsets.");
+RequireMonotonic(updated);
+Require(MacroSequenceEditor.TotalDurationMicroseconds([]) == 0, "Total duration of an empty sequence was not zero.");
+Require(MacroSequenceEditor.TotalDurationMicroseconds(editorEvents) == 1_000_000, "Total duration did not equal the last offset.");
+nint recorderForeground = (nint)0x1234;
+var boundsRecorder = new MacroRecorder(foregroundWindow: () => recorderForeground, clientMetrics: (_, _) => (0, 0, 10, 10), windowMatches: (fg, target) => fg == target);
+var recorderWindow = new RecorderWindow("default", (nint)0x1234, 10, 10);
+boundsRecorder.Start([recorderWindow]);
+Require(boundsRecorder.TryRecordDetailed(recorderWindow, E(0), 999, 999, injected: false, multiWindow: false, out var bypassReason) && bypassReason is null, "A keyboard event far outside the client bounds was not recorded.");
+Require(!boundsRecorder.TryRecordDetailed(recorderWindow, E(0, MacroEventKind.MouseButtonDown), 999, 999, injected: false, multiWindow: false, out var boundsReason) && boundsReason is not null && boundsReason.Contains("bounds"), "A pointer event outside the client bounds was not rejected.");
+Require(!boundsRecorder.TryRecordDetailed(recorderWindow, E(0), 0, 0, injected: true, multiWindow: false, out var injectedReason) && injectedReason is not null && injectedReason.Contains("injected"), "An injected key event was not rejected.");
+Require(!boundsRecorder.TryRecordDetailed(new RecorderWindow("default", (nint)0x9999, 10, 10), E(0), 0, 0, injected: false, multiWindow: false, out var unknownReason) && unknownReason is not null && unknownReason.Contains("not in target set"), "An unknown target window was not rejected.");
+recorderForeground = (nint)0x5555;
+Require(!boundsRecorder.TryRecordDetailed(recorderWindow, E(0), 0, 0, injected: false, multiWindow: false, out var mismatchReason) && mismatchReason is not null && mismatchReason.Contains("foreground mismatch"), "A foreground mismatch was not rejected.");
+Require(boundsRecorder.TryRecordDetailed(recorderWindow, E(0), 0, 0, injected: false, multiWindow: true, out _), "A foreground mismatch was not tolerated in multi-window mode.");
+recorderForeground = (nint)0x1234;
+var zeroMetricsRecorder = new MacroRecorder(foregroundWindow: () => (nint)0x1234, clientMetrics: (_, _) => (0, 0, 0, 0), windowMatches: (fg, target) => fg == target);
+var zeroSizeWindow = new RecorderWindow("default", (nint)0x1234, 0, 0);
+zeroMetricsRecorder.Start([zeroSizeWindow]);
+Require(zeroMetricsRecorder.TryRecord(zeroSizeWindow, E(0), 0, 0, injected: false, multiWindow: false), "A keyboard event was not recorded for a zero-size window.");
+Require(new DiagnosticEntry(new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc), "info", "hello").ToString().EndsWith("[info]  hello"), "Diagnostic entry formatting did not end with the level and message.");
+Console.WriteLine("Macro sequence editor tests passed.");

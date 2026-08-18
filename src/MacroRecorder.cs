@@ -38,15 +38,37 @@ public sealed class MacroRecorder
 
     public bool TryRecord(RecorderWindow window, MacroEvent input, int clientX, int clientY, bool injected, bool multiWindow)
     {
-        if (injected) return false;
+        return TryRecordDetailed(window, input, clientX, clientY, injected, multiWindow, out _);
+    }
+
+    public bool TryRecordDetailed(RecorderWindow window, MacroEvent input, int clientX, int clientY, bool injected, bool multiWindow, out string? rejectReason)
+    {
+        if (injected)
+        {
+            rejectReason = "injected input";
+            return false;
+        }
         lock (_gate)
         {
-            if (!_windows.ContainsKey(window.WindowHandle)) return false;
-            if (!multiWindow && !_windowMatches(_foregroundWindow(), window.WindowHandle)) return false;
+            if (!_windows.ContainsKey(window.WindowHandle))
+            {
+                rejectReason = "window not in target set";
+                return false;
+            }
+            if (!multiWindow && !_windowMatches(_foregroundWindow(), window.WindowHandle))
+            {
+                rejectReason = $"foreground mismatch (fg=0x{_foregroundWindow():x}, target=0x{window.WindowHandle:x})";
+                return false;
+            }
             var metrics = _clientMetrics(window.WindowHandle, false);
             var width = metrics.Width > 0 ? metrics.Width : window.ClientWidth;
             var height = metrics.Height > 0 ? metrics.Height : window.ClientHeight;
-            if (clientX < 0 || clientY < 0 || clientX >= width || clientY >= height) return false;
+            if (input.Kind is not (MacroEventKind.KeyDown or MacroEventKind.KeyUp) &&
+                (clientX < 0 || clientY < 0 || clientX >= width || clientY >= height))
+            {
+                rejectReason = $"pointer outside client bounds ({clientX},{clientY}) vs ({width},{height})";
+                return false;
+            }
             _events.Add(input with
             {
                 OffsetMicroseconds = Math.Max(0, _clock.ElapsedTicks * 1_000_000 / Stopwatch.Frequency),
@@ -54,6 +76,7 @@ public sealed class MacroRecorder
                 NormalizedY = MacroCoordinateMapper.Normalize(clientY, height),
                 WindowRole = multiWindow ? window.Role : null
             });
+            rejectReason = null;
             return true;
         }
     }

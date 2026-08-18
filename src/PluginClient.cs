@@ -24,13 +24,34 @@ public sealed class PluginClient : IAsyncDisposable
 
     public static PluginClient? FromArgs(string[] args)
     {
-        var values = ParseArgs(args);
-        if (!values.TryGetValue("pipe", out var pipe) || !values.TryGetValue("plugin-id", out var id)) return null;
-        if (!values.TryGetValue("token", out var token) && values.TryGetValue("token-file", out var tokenFile)) { token = File.ReadAllText(tokenFile).Trim(); try { File.Delete(tokenFile); } catch { } }
-        if (string.IsNullOrWhiteSpace(token)) return null;
-        var manifest = Path.Combine(AppContext.BaseDirectory, "plugin.json");
-        if (!File.Exists(manifest)) manifest = Path.Combine(AppContext.BaseDirectory, "manifest.json");
-        return File.Exists(manifest) ? new PluginClient(pipe, token, id, manifest) : null;
+        try
+        {
+            if (args is null) return null;
+            if (!TryParseArgs(args, out var values)) return null;
+            if (!TryGetValue(values, "pipe", out var pipe) || !TryGetValue(values, "plugin-id", out var id)) return null;
+            if (values.ContainsKey("token") && values.ContainsKey("token-file")) return null;
+
+            string? token;
+            if (values.TryGetValue("token", out var inlineToken)) token = inlineToken;
+            else if (TryGetValue(values, "token-file", out var tokenFile))
+            {
+                token = File.ReadAllText(tokenFile).Trim();
+                try { File.Delete(tokenFile); } catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            else return null;
+
+            if (string.IsNullOrWhiteSpace(token)) return null;
+            var manifest = Path.Combine(AppContext.BaseDirectory, "plugin.json");
+            if (!File.Exists(manifest)) manifest = Path.Combine(AppContext.BaseDirectory, "manifest.json");
+            return File.Exists(manifest) ? new PluginClient(pipe, token, id, manifest) : null;
+        }
+        catch (ArgumentException) { return null; }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+        catch (JsonException) { return null; }
+        catch (InvalidOperationException) { return null; }
+        catch (KeyNotFoundException) { return null; }
     }
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
@@ -91,8 +112,25 @@ public sealed class PluginClient : IAsyncDisposable
     }
     private async Task<bool> ReadExactlyAsync(byte[] buffer, CancellationToken cancellationToken)
     { var offset = 0; while (offset < buffer.Length) { var read = await _pipe.ReadAsync(buffer.AsMemory(offset), cancellationToken); if (read == 0) return false; offset += read; } return true; }
-    private static Dictionary<string, string> ParseArgs(string[] args)
-    { var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); for (var i = 0; i + 1 < args.Length; i++) if (args[i].StartsWith("--", StringComparison.Ordinal)) result[args[i][2..]] = args[++i]; return result; }
+    private static bool TryParseArgs(string[] args, out Dictionary<string, string> result)
+    {
+        result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < args.Length; i++)
+        {
+            var argument = args[i];
+            if (argument is null) return false;
+            if (!argument.StartsWith("--", StringComparison.Ordinal)) continue;
+            var key = argument[2..];
+            if (key.Length == 0) return false;
+            if (result.ContainsKey(key)) return false;
+            if (key.Equals("ram-plugin", StringComparison.OrdinalIgnoreCase)) { result[key] = "true"; continue; }
+            if (i + 1 >= args.Length || args[i + 1] is null || args[i + 1].StartsWith("--", StringComparison.Ordinal)) return false;
+            result[key] = args[++i];
+        }
+        return true;
+    }
+    private static bool TryGetValue(IReadOnlyDictionary<string, string> values, string key, out string value)
+        => values.TryGetValue(key, out value!) && !string.IsNullOrWhiteSpace(value);
     public sealed record Envelope(string Type, string RequestId, JsonElement Payload, int ProtocolMajor = 1, int ProtocolMinor = 0);
     private static class Json
     {

@@ -8,4 +8,4 @@ Build with the .NET 8 Windows SDK. The release package contains `plugin.json`, `
 
 ## Official releases
 
-The repository workflow publishes a release from a matching `vMAJOR.MINOR.PATCH` tag or a manual dispatch. Configure `RAM_PLUGIN_SIGNING_KEY` (Ed25519 private PEM) and `RAM_PLUGIN_SIGNING_PUBLIC_KEY` (matching public PEM) repository secrets first. The public key must match the launcher trust anchor; missing secrets fail closed and never publish unsigned official assets.
+After merging a PR that bumps `plugin.json` and `manifest.json` to a newer matching `MAJOR.MINOR.PATCH`, the repository workflow creates the matching `vMAJOR.MINOR.PATCH` tag and dispatches the signed release automatically. Configure `RAM_PLUGIN_SIGNING_KEY` (Ed25519 private PEM) and `RAM_PLUGIN_SIGNING_PUBLIC_KEY` (matching public PEM) repository secrets first. The public key must match the launcher trust anchor; missing secrets fail closed and never publish unsigned official assets. Manual dispatch remains available as a recovery path.

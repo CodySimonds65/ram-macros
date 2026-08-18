@@ -13,6 +13,7 @@ public sealed class PluginClient : IAsyncDisposable
     private readonly string _token;
     private readonly string _manifestPath;
     private readonly string[] _capabilities;
+    private int _disposed;
     public PluginClient(string pipeName, string token, string pluginId, string manifestPath)
     {
         _pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
@@ -33,6 +34,7 @@ public sealed class PluginClient : IAsyncDisposable
     }
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
+        ThrowIfDisposed();
         await _pipe.ConnectAsync(5000, cancellationToken);
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(_manifestPath, cancellationToken))).ToLowerInvariant();
         using var currentProcess = System.Diagnostics.Process.GetCurrentProcess();
@@ -42,16 +44,39 @@ public sealed class PluginClient : IAsyncDisposable
     }
     public async Task SendAsync(string type, object payload, string requestId = "", CancellationToken cancellationToken = default)
     {
+        ThrowIfDisposed();
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new Envelope(type, requestId, JsonSerializer.SerializeToElement(payload, Json.Options)), Json.Options);
         if (bytes.Length > 1024 * 1024) throw new InvalidDataException("Plugin message too large.");
         var header = new byte[4]; BinaryPrimitives.WriteInt32LittleEndian(header, bytes.Length);
         await _writeGate.WaitAsync(cancellationToken);
-        try { await _pipe.WriteAsync(header, cancellationToken); await _pipe.WriteAsync(bytes, cancellationToken); await _pipe.FlushAsync(cancellationToken); }
+        try
+        {
+            ThrowIfDisposed();
+            await _pipe.WriteAsync(header, cancellationToken);
+            await _pipe.WriteAsync(bytes, cancellationToken);
+            await _pipe.FlushAsync(cancellationToken);
+        }
         finally { _writeGate.Release(); }
     }
     public Task<Envelope?> ReceiveAsync(CancellationToken cancellationToken = default) => ReadAsync(cancellationToken);
     public static T? Deserialize<T>(JsonElement payload) => payload.Deserialize<T>(Json.Options);
-    public async ValueTask DisposeAsync() { _writeGate.Dispose(); await _pipe.DisposeAsync(); }
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        try
+        {
+            await _writeGate.WaitAsync().ConfigureAwait(false);
+            _writeGate.Release();
+        }
+        catch (ObjectDisposedException) { }
+        await _pipe.DisposeAsync().ConfigureAwait(false);
+        _writeGate.Dispose();
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(PluginClient));
+    }
     private async Task<Envelope?> ReadAsync(CancellationToken cancellationToken)
     {
         var header = new byte[4]; if (!await ReadExactlyAsync(header, cancellationToken)) return null;

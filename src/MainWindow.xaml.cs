@@ -63,7 +63,12 @@ public partial class MainWindow : Window
     private void Diagnostics_Added(object? sender, DiagnosticEntry entry)
     {
         if (Dispatcher.CheckAccess()) AddDiagnosticToList(entry);
-        else Dispatcher.BeginInvoke(new Action(() => AddDiagnosticToList(entry)));
+        else
+        {
+            try { Dispatcher.BeginInvoke(new Action(() => AddDiagnosticToList(entry))); }
+            catch (InvalidOperationException) when (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) { }
+            catch (TaskCanceledException) { }
+        }
     }
 
     private void AddDiagnosticToList(DiagnosticEntry entry)

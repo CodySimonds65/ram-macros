@@ -1,5 +1,6 @@
 using RamMacros;
 using System.Text.Json;
+using System.Reflection;
 
 static void Require(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
 var input = new MacroEvent { NormalizedX = 0.5, NormalizedY = 0.25 };
@@ -26,7 +27,16 @@ var tokenPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".token");
 await File.WriteAllTextAsync(tokenPath, "test-token");
 var launchClient = PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--token-file", tokenPath, "--plugin-id", "io.github.codysimonds65.ram.macros", "--data", "test-data"]);
 Require(launchClient is not null && !File.Exists(tokenPath), "Plugin launch arguments did not preserve the host pipe and token-file values.");
+var pluginIdField = typeof(PluginClient).GetField("_pluginId", BindingFlags.Instance | BindingFlags.NonPublic);
+var tokenField = typeof(PluginClient).GetField("_token", BindingFlags.Instance | BindingFlags.NonPublic);
+Require((string?)pluginIdField?.GetValue(launchClient) == "io.github.codysimonds65.ram.macros", "Plugin launch arguments did not preserve the plugin ID.");
+Require((string?)tokenField?.GetValue(launchClient) == "test-token", "Plugin launch arguments did not preserve the token.");
 await launchClient!.DisposeAsync();
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe"]) is null, "A missing pipe value was accepted.");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "", "--plugin-id", "io.github.codysimonds65.ram.macros", "--token", "test-token"]) is null, "An empty pipe value was accepted.");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id"]) is null, "A missing plugin ID value was accepted.");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.macros", "--token-file"]) is null, "A missing token-file value was accepted.");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.macros", "--token-file", Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".missing")]) is null, "A missing token file was not rejected safely.");
 var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".ramacro");
 try
 {

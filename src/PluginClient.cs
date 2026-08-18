@@ -50,6 +50,7 @@ public sealed class PluginClient : IAsyncDisposable
         finally { _writeGate.Release(); }
     }
     public Task<Envelope?> ReceiveAsync(CancellationToken cancellationToken = default) => ReadAsync(cancellationToken);
+    public static T? Deserialize<T>(JsonElement payload) => payload.Deserialize<T>(Json.Options);
     public async ValueTask DisposeAsync() { _writeGate.Dispose(); await _pipe.DisposeAsync(); }
     private async Task<Envelope?> ReadAsync(CancellationToken cancellationToken)
     {

@@ -36,7 +36,6 @@ public partial class MainWindow : Window
     private int _playHotkeyVk = 0x77;
     private readonly HashSet<string> _targetAccountIds = new(StringComparer.Ordinal);
     private bool _targetsTouched;
-    private readonly GlobalInputCapture _hotkeyWatcher = new();
     private bool _playHeld;
     private long _lastPlayHotkeyUtc;
     private readonly string _storageDirectory;
@@ -63,11 +62,7 @@ public partial class MainWindow : Window
                 return (0, 0, metrics.Width, metrics.Height);
             },
             NativeWindowMetrics.IsSameWindowTree);
-        SourceInitialized += (_, _) =>
-        {
-            _windowHandle = new WindowInteropHelper(this).Handle;
-            _hotkeyWatcher.Start(HandleHotkey, nint.Zero);
-        };
+        SourceInitialized += (_, _) => _windowHandle = new WindowInteropHelper(this).Handle;
         LoadSettings();
         LoadLibrary();
         RecordHotkeyButton.Content = $"Record hotkey: {KeyName(_recordHotkeyVk)}";
@@ -75,8 +70,17 @@ public partial class MainWindow : Window
         PlayModeCombo.SelectionChanged += (_, _) => RepeatCountBox.IsEnabled = PlayModeCombo.SelectedIndex == 1;
         RefreshAccountTargets();
         var app = Application.Current as App;
-        if (app?.Playback is not null) app.Playback.StateChanged += Playback_StateChanged;
+        if (app is not null)
+        {
+            app.Playback.StateChanged += Playback_StateChanged;
+            app.HotkeyPressed += App_HotkeyPressed;
+            app.HotkeyReleased += App_HotkeyReleased;
+            app.UpdateHotkeySubscription(_recordHotkeyVk, _playHotkeyVk);
+        }
     }
+
+    private void App_HotkeyPressed(object? sender, int virtualKey) => OnHotkeyFromHost(virtualKey, pressed: true);
+    private void App_HotkeyReleased(object? sender, int virtualKey) => OnHotkeyFromHost(virtualKey, pressed: false);
 
     private void LoadLibrary()
     {
@@ -138,39 +142,6 @@ public partial class MainWindow : Window
         {
             // Settings are best-effort; the hotkeys still apply for this session.
         }
-    }
-
-    private void HandleHotkey(CapturedInput captured)
-    {
-        if (captured.Injected) return;
-        var vk = captured.Event.VirtualKey;
-        if (captured.Event.Kind == MacroEventKind.KeyUp)
-        {
-            if (vk == _playHotkeyVk && _playHeld)
-            {
-                _playHeld = false;
-                (Application.Current as App)?.Playback.Stop();
-            }
-            return;
-        }
-        if (vk == _recordHotkeyVk)
-        {
-            if (!_recording) StartRecording();
-            return;
-        }
-        if (vk != _playHotkeyVk || _recording) return;
-        var now = Environment.TickCount64;
-        if (now - _lastPlayHotkeyUtc < 250) return;
-        _lastPlayHotkeyUtc = now;
-        var app = Application.Current as App;
-        if (app?.Playback is null) return;
-        if (app.Playback.IsPlaying)
-        {
-            _playHeld = false;
-            app.Playback.Stop();
-            return;
-        }
-        if (TryStartPlayback()) _playHeld = PlayModeCombo.SelectedIndex == 3;
     }
 
     private void NewMacro_Click(object sender, RoutedEventArgs e)
@@ -369,6 +340,7 @@ public partial class MainWindow : Window
         _recordHotkeyVk = vk;
         RecordHotkeyButton.Content = $"Record hotkey: {KeyName(_recordHotkeyVk)}";
         SaveSettings();
+        (Application.Current as App)?.UpdateHotkeySubscription(_recordHotkeyVk, _playHotkeyVk);
         Diagnostic($"Recording hotkey set to {KeyName(_recordHotkeyVk)}.");
     }
 
@@ -385,6 +357,7 @@ public partial class MainWindow : Window
         _playHotkeyVk = vk;
         PlayHotkeyButton.Content = $"Play hotkey: {KeyName(_playHotkeyVk)}";
         SaveSettings();
+        (Application.Current as App)?.UpdateHotkeySubscription(_recordHotkeyVk, _playHotkeyVk);
         Diagnostic($"Playback hotkey set to {KeyName(_playHotkeyVk)}.");
     }
 
@@ -456,9 +429,7 @@ public partial class MainWindow : Window
         _recorder.Start([new RecorderWindow("default", _panelTargetWindow, seedMetrics.Width, seedMetrics.Height)]);
         try
         {
-            _inputCapture.StopHotkey = (uint)_recordHotkeyVk;
             _inputCapture.Start(HandleCapturedInput, _windowHandle, recordPanelKeyboard: true);
-            _inputCapture.StopRequested = OnStopHotkey;
         }
         catch (Exception ex)
         {
@@ -592,24 +563,43 @@ public partial class MainWindow : Window
         else Dispatcher.BeginInvoke(action);
     }
 
-    private void OnStopHotkey()
+    private void OnHotkeyFromHost(int virtualKey, bool pressed)
     {
-        if (_recording)
+        QueueUi(() =>
         {
-            _inputCapture.StopRequested = null;
-            _inputCapture.Stop();
-            Dispatcher.BeginInvoke(DispatcherPriority.Background, StopRecording);
-        }
-        else
-        {
-            StartRecording();
-        }
+            if (pressed)
+            {
+                if (virtualKey == _recordHotkeyVk)
+                {
+                    if (_recording) StopRecording();
+                    else StartRecording();
+                    return;
+                }
+                if (virtualKey != _playHotkeyVk || _recording) return;
+                var now = Environment.TickCount64;
+                if (now - _lastPlayHotkeyUtc < 250) return;
+                _lastPlayHotkeyUtc = now;
+                var app = Application.Current as App;
+                if (app?.Playback is null) return;
+                if (app.Playback.IsPlaying)
+                {
+                    _playHeld = false;
+                    app.Playback.Stop();
+                    return;
+                }
+                if (TryStartPlayback()) _playHeld = PlayModeCombo.SelectedIndex == 3;
+            }
+            else if (virtualKey == _playHotkeyVk && _playHeld)
+            {
+                _playHeld = false;
+                (Application.Current as App)?.Playback.Stop();
+            }
+        });
     }
 
     private void StopRecording()
     {
         if (!_recording) return;
-        _inputCapture.StopRequested = null;
         _inputCapture.Stop();
         var events = _recorder.Stop();
         _recording = false;
@@ -1059,11 +1049,13 @@ public partial class MainWindow : Window
     {
         _diagnostics.Added -= Diagnostics_Added;
         _managedAccounts.Changed -= ManagedAccounts_Changed;
-        _inputCapture.StopRequested = null;
         _inputCapture.Dispose();
-        _hotkeyWatcher.Dispose();
-        if (Application.Current is App app && app.Playback is not null)
+        if (Application.Current is App app)
+        {
             app.Playback.StateChanged -= Playback_StateChanged;
+            app.HotkeyPressed -= App_HotkeyPressed;
+            app.HotkeyReleased -= App_HotkeyReleased;
+        }
         base.OnClosed(e);
     }
 }

@@ -75,4 +75,5 @@ public sealed record ManagedAccountSnapshot(
     uint Dpi,
     bool IsMinimized,
     DateTime LastActivityUtc,
-    bool IsRunning);
+    bool IsRunning,
+    nint RootWindowHandle = 0);

@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
+using System.Windows.Threading;
 using Microsoft.Win32;
 
 namespace RamMacros;
@@ -65,7 +66,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_managedAccounts.Snapshot().Count == 0)
+        var foreground = NativeWindowMetrics.GetForegroundWindow();
+        if (_managedAccounts.Snapshot().Count == 0 && foreground != _windowHandle)
         {
             StatusText.Text = "No running managed Roblox windows are available. Start an account and try again.";
             return;
@@ -76,8 +78,10 @@ public partial class MainWindow : Window
         _recorder.Start([]);
         _inputCapture.Start(HandleCapturedInput, _windowHandle);
         RecordButton.Content = "■  Stop recording";
-        FooterText.Text = "Recording background input. Activate a managed Roblox window to bind it; injected events are ignored.";
-        StatusText.Text = "Waiting for a managed window to become foreground...";
+        FooterText.Text = "Recording background input. The panel stays visible; its own input is ignored.";
+        StatusText.Text = foreground == _windowHandle
+            ? "Recording armed. Activate a managed Roblox window; events will appear here."
+            : "Recording managed window input...\nTarget will bind to the active Roblox client.";
     }
 
     private void HandleCapturedInput(CapturedInput captured)
@@ -106,11 +110,11 @@ public partial class MainWindow : Window
     private void QueueEventListRefresh()
     {
         if (Interlocked.Exchange(ref _eventRefreshPending, 1) != 0) return;
-        QueueUi(() =>
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
         {
             Interlocked.Exchange(ref _eventRefreshPending, 0);
             RefreshEventList();
-        });
+        }));
     }
 
     private void QueueUi(Action action)

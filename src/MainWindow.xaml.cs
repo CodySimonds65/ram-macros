@@ -34,14 +34,18 @@ public partial class MainWindow : Window
     private DateTime _lastRejectedDiagnosticUtc;
     private bool _standaloneRecording;
     private int _recordHotkeyVk = 0x78;
+    private readonly string _storageDirectory;
+    private readonly string _libraryPath;
 
-    private static string SettingsPath => Path.Combine(AppContext.BaseDirectory, "settings.json");
+    private string SettingsPath => Path.Combine(_storageDirectory, "settings.json");
 
-    public MainWindow(ManagedAccountRegistry? managedAccounts = null, DiagnosticsLog? diagnostics = null)
+    public MainWindow(ManagedAccountRegistry? managedAccounts = null, DiagnosticsLog? diagnostics = null, string? dataDirectory = null)
     {
         InitializeComponent();
         _managedAccounts = managedAccounts ?? new ManagedAccountRegistry();
         _diagnostics = diagnostics ?? new DiagnosticsLog();
+        _storageDirectory = string.IsNullOrWhiteSpace(dataDirectory) ? AppContext.BaseDirectory : dataDirectory;
+        _libraryPath = Path.Combine(_storageDirectory, "library.json");
         _diagnostics.Added += Diagnostics_Added;
         _managedAccounts.Changed += ManagedAccounts_Changed;
         MacroList.ItemsSource = _macros;
@@ -56,7 +60,39 @@ public partial class MainWindow : Window
             NativeWindowMetrics.IsSameWindowTree);
         SourceInitialized += (_, _) => _windowHandle = new WindowInteropHelper(this).Handle;
         LoadSettings();
+        LoadLibrary();
         HotkeyButton.Content = $"Hotkey: {KeyName(_recordHotkeyVk)}";
+    }
+
+    private void LoadLibrary()
+    {
+        try
+        {
+            var library = MacroStore.LoadLibrary(_libraryPath);
+            if (library is null) return;
+            foreach (var macro in library.Macros) _macros.Add(macro);
+            if (_macros.Count > 0)
+            {
+                RefreshMacroList(_macros[0]);
+                Diagnostic($"Loaded {_macros.Count} macro(s) from the local library.");
+            }
+        }
+        catch
+        {
+            DiagnosticWarning("The saved macro library could not be loaded; starting with an empty library.");
+        }
+    }
+
+    private void SaveLibrary()
+    {
+        try
+        {
+            MacroStore.SaveLibrary(_libraryPath, new MacroBundle { Macros = _macros.ToArray() });
+        }
+        catch
+        {
+            DiagnosticWarning("The macro library could not be saved.");
+        }
     }
 
     private void LoadSettings()
@@ -93,13 +129,14 @@ public partial class MainWindow : Window
         while (_macros.Any(macro => string.Equals(macro.Name, $"Macro {nextNumber}", StringComparison.OrdinalIgnoreCase))) nextNumber++;
         var macro = new MacroDefinition { Name = $"Macro {nextNumber}" };
         _macros.Add(macro);
+        SaveLibrary();
         RefreshMacroList(macro);
     }
     private void Import_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new OpenFileDialog { Filter = "RAM macro bundle (*.ramacro)|*.ramacro" };
         if (dialog.ShowDialog(this) != true) return;
-        try { var bundle = MacroStore.ImportAsync(dialog.FileName).GetAwaiter().GetResult(); foreach (var macro in bundle.Macros) _macros.Add(macro); StatusText.Text = $"Imported {bundle.Macros.Count} macro(s)."; }
+        try { var bundle = MacroStore.ImportAsync(dialog.FileName).GetAwaiter().GetResult(); foreach (var macro in bundle.Macros) _macros.Add(macro); SaveLibrary(); StatusText.Text = $"Imported {bundle.Macros.Count} macro(s)."; }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Import failed", MessageBoxButton.OK, MessageBoxImage.Error); }
         RefreshMacroList(_selected);
     }
@@ -140,6 +177,7 @@ public partial class MainWindow : Window
         if (GetContextMacro(sender) is not { } macro) return;
         var duplicate = macro with { Id = Guid.NewGuid().ToString("N"), Name = $"{macro.Name} copy" };
         _macros.Add(duplicate);
+        SaveLibrary();
         RefreshMacroList(duplicate);
         Diagnostic($"Duplicated macro '{macro.Name}'.");
     }
@@ -180,6 +218,7 @@ public partial class MainWindow : Window
         if (index < 0) return;
         _macros[index] = renamed;
         if (_selected?.Id == macro.Id) _selected = renamed;
+        SaveLibrary();
         RefreshMacroList(renamed);
         RefreshEventList();
         Diagnostic($"Renamed macro to '{renamed.Name}'.");
@@ -191,6 +230,7 @@ public partial class MainWindow : Window
         if (_recording && _selected?.Id == macro.Id) StopRecording();
         _macros.Remove(macro);
         if (_selected?.Id == macro.Id) _selected = _macros.FirstOrDefault();
+        SaveLibrary();
         RefreshMacroList(_selected);
         RefreshEventList();
         Diagnostic($"Removed macro '{macro.Name}'.");
@@ -539,6 +579,7 @@ public partial class MainWindow : Window
             if (index >= 0) _macros[index] = updated;
             _selected = updated;
             MacroList.SelectedItem = updated;
+            SaveLibrary();
         }
         RefreshEventList();
         StatusText.Text = $"Recording stopped.\n{events.Count} event(s) captured.";
@@ -648,6 +689,7 @@ public partial class MainWindow : Window
         if (index >= 0) _macros[index] = updated;
         _selected = updated;
         MacroList.SelectedItem = updated;
+        SaveLibrary();
         RefreshEventList();
     }
 

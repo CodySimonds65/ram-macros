@@ -60,6 +60,15 @@ try
     Require(loaded.Macros.Count == 1 && loaded.Macros[0].Events.Count == 1, "Macro bundle round-trip failed.");
 }
 finally { if (File.Exists(path)) File.Delete(path); }
+var libraryPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".library.json");
+try
+{
+    MacroStore.SaveLibrary(libraryPath, new MacroBundle { Macros = [new MacroDefinition { Name = "Saved", Events = [input] }] });
+    var reloadedLibrary = MacroStore.LoadLibrary(libraryPath);
+    Require(reloadedLibrary is not null && reloadedLibrary.Macros.Count == 1 && reloadedLibrary.Macros[0].Name == "Saved" && reloadedLibrary.Macros[0].Events.Count == 1, "Macro library save/load round-trip failed.");
+    Require(MacroStore.LoadLibrary(Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".missing.json")) is null, "A missing library file did not load as empty.");
+}
+finally { if (File.Exists(libraryPath)) File.Delete(libraryPath); }
 Console.WriteLine("RAM Macros tests passed.");
 static MacroEvent E(long offsetUs, MacroEventKind kind = MacroEventKind.KeyDown) => new MacroEvent { OffsetMicroseconds = offsetUs, Kind = kind, VirtualKey = 65 };
 static void RequireMonotonic(IReadOnlyList<MacroEvent> items)

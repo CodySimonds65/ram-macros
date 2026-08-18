@@ -26,14 +26,19 @@ public sealed class GlobalInputCapture : IDisposable
     private const uint LlkhfUp = 0x00000080;
     private const uint LlMhfInjected = 0x00000001;
 
+    private const int VkF9 = 0x78;
+
     private readonly LowLevelKeyboardProc _keyboardProc;
     private readonly LowLevelMouseProc _mouseProc;
     private Action<CapturedInput>? _callback;
     private nint _keyboardHook;
     private nint _mouseHook;
     private nint _ignoredWindow;
+    private bool _recordPanelKeyboard;
     private POINT _lastMousePoint;
     private bool _hasLastMousePoint;
+
+    public Action? StopRequested { get; set; }
 
     public GlobalInputCapture()
     {
@@ -41,12 +46,13 @@ public sealed class GlobalInputCapture : IDisposable
         _mouseProc = MouseHook;
     }
 
-    public void Start(Action<CapturedInput> callback, nint ignoredWindow)
+    public void Start(Action<CapturedInput> callback, nint ignoredWindow, bool recordPanelKeyboard = false)
     {
         if (_keyboardHook != nint.Zero || _mouseHook != nint.Zero)
             throw new InvalidOperationException("Input capture is already running.");
         _callback = callback ?? throw new ArgumentNullException(nameof(callback));
         _ignoredWindow = ignoredWindow;
+        _recordPanelKeyboard = recordPanelKeyboard;
         _hasLastMousePoint = false;
         var module = GetModuleHandle(null);
         _keyboardHook = SetKeyboardHook(WhKeyboardLl, _keyboardProc, module, 0);
@@ -67,6 +73,7 @@ public sealed class GlobalInputCapture : IDisposable
         _mouseHook = nint.Zero;
         _callback = null;
         _ignoredWindow = nint.Zero;
+        _recordPanelKeyboard = false;
         _hasLastMousePoint = false;
     }
 
@@ -76,21 +83,37 @@ public sealed class GlobalInputCapture : IDisposable
         {
             var data = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
             var injected = (data.Flags & (LlkhfInjected | LlkhfLowerIlInjected)) != 0;
-            var window = GetForegroundWindow();
-            if (window != nint.Zero && window != _ignoredWindow)
+            if (!injected && data.VirtualKeyCode == VkF9 && (data.Flags & LlkhfUp) == 0)
             {
-                _callback?.Invoke(new CapturedInput(
-                    new MacroEvent
-                    {
-                        Kind = (data.Flags & LlkhfUp) != 0 ? MacroEventKind.KeyUp : MacroEventKind.KeyDown,
-                        VirtualKey = unchecked((int)data.VirtualKeyCode),
-                        ScanCode = unchecked((int)data.ScanCode),
-                        Extended = (data.Flags & 0x01) != 0
-                    },
-                    window,
-                    0,
-                    0,
-                    injected));
+                if (StopRequested != null)
+                {
+                    try { StopRequested(); }
+                    catch { }
+                }
+                return CallNextHookEx(nint.Zero, code, wParam, lParam);
+            }
+            var window = GetForegroundWindow();
+            if (window != nint.Zero && (_recordPanelKeyboard || window != _ignoredWindow))
+            {
+                try
+                {
+                    _callback?.Invoke(new CapturedInput(
+                        new MacroEvent
+                        {
+                            Kind = (data.Flags & LlkhfUp) != 0 ? MacroEventKind.KeyUp : MacroEventKind.KeyDown,
+                            VirtualKey = unchecked((int)data.VirtualKeyCode),
+                            ScanCode = unchecked((int)data.ScanCode),
+                            Extended = (data.Flags & 0x01) != 0
+                        },
+                        window,
+                        0,
+                        0,
+                        injected));
+                }
+                catch
+                {
+                    // A failing handler must never break the input hook chain.
+                }
             }
         }
         return CallNextHookEx(nint.Zero, code, wParam, lParam);
@@ -122,7 +145,14 @@ public sealed class GlobalInputCapture : IDisposable
                     {
                         _lastMousePoint = data.Point;
                         _hasLastMousePoint = true;
-                        _callback?.Invoke(new CapturedInput(new MacroEvent { Kind = kind.Value, Button = button, WheelDelta = wheel }, window, clientX, clientY, (data.Flags & LlMhfInjected) != 0, data.Point.X, data.Point.Y));
+                        try
+                        {
+                            _callback?.Invoke(new CapturedInput(new MacroEvent { Kind = kind.Value, Button = button, WheelDelta = wheel }, window, clientX, clientY, (data.Flags & LlMhfInjected) != 0, data.Point.X, data.Point.Y));
+                        }
+                        catch
+                        {
+                            // A failing handler must never break the input hook chain.
+                        }
                     }
                 }
             }

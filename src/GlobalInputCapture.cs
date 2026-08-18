@@ -21,12 +21,11 @@ public sealed class GlobalInputCapture : IDisposable
     private const int WmMButtonDown = 0x0207;
     private const int WmMButtonUp = 0x0208;
     private const int WmMouseWheel = 0x020A;
+    private const uint VkF9 = 0x78;
     private const uint LlkhfInjected = 0x00000010;
     private const uint LlkhfLowerIlInjected = 0x00000002;
     private const uint LlkhfUp = 0x00000080;
     private const uint LlMhfInjected = 0x00000001;
-
-    private const int VkF9 = 0x78;
 
     private readonly LowLevelKeyboardProc _keyboardProc;
     private readonly LowLevelMouseProc _mouseProc;
@@ -39,6 +38,8 @@ public sealed class GlobalInputCapture : IDisposable
     private bool _hasLastMousePoint;
 
     public Action? StopRequested { get; set; }
+
+    public uint StopHotkey { get; set; } = VkF9;
 
     public GlobalInputCapture()
     {
@@ -83,7 +84,7 @@ public sealed class GlobalInputCapture : IDisposable
         {
             var data = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
             var injected = (data.Flags & (LlkhfInjected | LlkhfLowerIlInjected)) != 0;
-            if (!injected && data.VirtualKeyCode == VkF9 && (data.Flags & LlkhfUp) == 0)
+            if (!injected && data.VirtualKeyCode == StopHotkey && (data.Flags & LlkhfUp) == 0)
             {
                 if (StopRequested != null)
                 {

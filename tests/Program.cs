@@ -110,6 +110,18 @@ Require(updated[0].OffsetMicroseconds == 0 && updated[1].OffsetMicroseconds == 2
 RequireMonotonic(updated);
 Require(MacroSequenceEditor.TotalDurationMicroseconds([]) == 0, "Total duration of an empty sequence was not zero.");
 Require(MacroSequenceEditor.TotalDurationMicroseconds(editorEvents) == 1_000_000, "Total duration did not equal the last offset.");
+var withDelay = MacroSequenceEditor.InsertDelay(editorEvents, 0);
+Require(withDelay.Count == 4 && withDelay[1].Kind == MacroEventKind.Delay, "InsertDelay did not place a delay row after the requested event.");
+Require(withDelay[0].OffsetMicroseconds == 0 && withDelay[1].OffsetMicroseconds == 250_000 && withDelay[2].OffsetMicroseconds == 250_000 && withDelay[3].OffsetMicroseconds == 1_000_000, "InsertDelay did not absorb the existing gap and shift the following event onto the delay end.");
+RequireMonotonic(withDelay);
+var appendedDelay = MacroSequenceEditor.InsertDelay(editorEvents, 2);
+Require(appendedDelay.Count == 4 && appendedDelay[3].Kind == MacroEventKind.Delay && appendedDelay[3].OffsetMicroseconds == 1_500_000, "InsertDelay at the end did not append a default 500 ms pause.");
+RequireMonotonic(appendedDelay);
+var emptyDelay = MacroSequenceEditor.InsertDelay([], 0);
+Require(emptyDelay.Count == 1 && emptyDelay[0].Kind == MacroEventKind.Delay, "InsertDelay on an empty sequence did not create a delay row.");
+Require(ReferenceEquals(MacroSequenceEditor.InsertDelay(editorEvents, 9), editorEvents), "An out-of-range InsertDelay index did not return the input unchanged.");
+var resizedDelay = MacroSequenceEditor.SetDelay(appendedDelay, 3, 1200);
+Require(resizedDelay[3].OffsetMicroseconds == 2_200_000 && resizedDelay[3].Kind == MacroEventKind.Delay, "SetDelay did not resize the delay row's pause.");
 nint recorderForeground = (nint)0x1234;
 var boundsRecorder = new MacroRecorder(foregroundWindow: () => recorderForeground, clientMetrics: (_, _) => (0, 0, 10, 10), windowMatches: (fg, target) => fg == target);
 var recorderWindow = new RecorderWindow("default", (nint)0x1234, 10, 10);

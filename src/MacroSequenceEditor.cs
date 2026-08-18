@@ -55,6 +55,27 @@ public static class MacroSequenceEditor
         return Rebuild(items, deltas);
     }
 
+    public static IReadOnlyList<MacroEvent> InsertDelay(IReadOnlyList<MacroEvent> events, int afterIndex, int defaultMilliseconds = 500)
+    {
+        if (events.Count == 0) return Insert(events, 0, new MacroEvent { Kind = MacroEventKind.Delay });
+        if (afterIndex < 0 || afterIndex >= events.Count) return events;
+        var deltas = ToDeltas(events);
+        var items = new List<MacroEvent>(events);
+        long gap;
+        if (afterIndex + 1 < deltas.Count)
+        {
+            gap = deltas[afterIndex + 1];
+            deltas[afterIndex + 1] = 0;
+        }
+        else
+        {
+            gap = Math.Max(0, defaultMilliseconds) * 1000L;
+        }
+        deltas.Insert(afterIndex + 1, gap);
+        items.Insert(afterIndex + 1, new MacroEvent { Kind = MacroEventKind.Delay });
+        return Rebuild(items, deltas);
+    }
+
     public static long TotalDurationMicroseconds(IReadOnlyList<MacroEvent> events) =>
         events.Count == 0 ? 0 : events[^1].OffsetMicroseconds;
 

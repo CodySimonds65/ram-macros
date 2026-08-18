@@ -13,7 +13,7 @@ public partial class App : Application
         MainWindow = new MainWindow(ManagedAccounts, Diagnostics); MainWindow.Show();
         _client = PluginClient.FromArgs(e.Args);
         if (_client is not null) _ = ConnectHostAsync(_client, Diagnostics);
-        else Diagnostics.Warning("Running without a launcher host pipe; managed-account input is unavailable.");
+        else Diagnostics.Info("Running without a launcher host pipe; standalone Roblox recording is available, while managed playback requires the launcher.");
     }
     private static async Task ConnectHostAsync(PluginClient client, DiagnosticsLog diagnostics)
     {

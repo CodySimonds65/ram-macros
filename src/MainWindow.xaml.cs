@@ -31,7 +31,8 @@ public partial class MainWindow : Window
             {
                 var metrics = NativeWindowMetrics.GetClientMetrics(window);
                 return (0, 0, metrics.Width, metrics.Height);
-            });
+            },
+            NativeWindowMetrics.IsSameWindowTree);
         SourceInitialized += (_, _) => _windowHandle = new WindowInteropHelper(this).Handle;
     }
 
@@ -76,7 +77,18 @@ public partial class MainWindow : Window
         _recording = true;
         _recordingWindow = nint.Zero;
         _recorder.Start([]);
-        _inputCapture.Start(HandleCapturedInput, _windowHandle);
+        try
+        {
+            _inputCapture.Start(HandleCapturedInput, _windowHandle);
+        }
+        catch (Exception ex)
+        {
+            _recorder.Stop();
+            _recording = false;
+            _recordingWindow = nint.Zero;
+            StatusText.Text = $"Could not start recording.\n{ex.Message}";
+            return;
+        }
         RecordButton.Content = "■  Stop recording";
         FooterText.Text = "Recording background input. The panel stays visible; its own input is ignored.";
         StatusText.Text = foreground == _windowHandle
@@ -91,17 +103,24 @@ public partial class MainWindow : Window
         // select a window or enter the recorded sequence.
         if (captured.Injected) return;
         if (!_managedAccounts.TryResolve(captured.WindowHandle, out var account)) return;
+        var targetWindow = account.WindowHandle;
+        var clientX = captured.ClientX;
+        var clientY = captured.ClientY;
+        if (captured.Event.Kind is MacroEventKind.MouseMove or MacroEventKind.MouseButtonDown or MacroEventKind.MouseButtonUp or MacroEventKind.MouseWheel)
+        {
+            if (!NativeWindowMetrics.TryScreenToClient(targetWindow, captured.ScreenX, captured.ScreenY, out clientX, out clientY)) return;
+        }
         if (_recordingWindow == nint.Zero)
         {
-            _recordingWindow = captured.WindowHandle;
+            _recordingWindow = targetWindow;
             var metrics = NativeWindowMetrics.GetClientMetrics(_recordingWindow);
             _recorder.Start([new RecorderWindow("default", _recordingWindow, metrics.Width, metrics.Height)]);
             QueueUi(() => StatusText.Text = $"Recording {account.Label} input...\nTarget bound to the managed window.");
         }
 
-        var metricsNow = NativeWindowMetrics.GetClientMetrics(captured.WindowHandle);
-        var recorderWindow = new RecorderWindow("default", captured.WindowHandle, metricsNow.Width, metricsNow.Height);
-        if (_recorder.TryRecord(recorderWindow, captured.Event, captured.ClientX, captured.ClientY, captured.Injected, multiWindow: false))
+        var metricsNow = NativeWindowMetrics.GetClientMetrics(targetWindow);
+        var recorderWindow = new RecorderWindow("default", targetWindow, metricsNow.Width, metricsNow.Height);
+        if (_recorder.TryRecord(recorderWindow, captured.Event, clientX, clientY, captured.Injected, multiWindow: false))
         {
             QueueEventListRefresh();
         }
@@ -174,9 +193,35 @@ internal static class NativeWindowMetrics
         return (Math.Max(0, rect.Right - rect.Left), Math.Max(0, rect.Bottom - rect.Top));
     }
 
+    public static bool IsSameWindowTree(nint left, nint right)
+    {
+        if (left == nint.Zero || right == nint.Zero) return false;
+        if (left == right) return true;
+        var leftRoot = GetAncestor(left, GaRoot);
+        var rightRoot = GetAncestor(right, GaRoot);
+        return leftRoot != nint.Zero && leftRoot == rightRoot;
+    }
+
+    public static bool TryScreenToClient(nint window, int screenX, int screenY, out int clientX, out int clientY)
+    {
+        var point = new POINT { X = screenX, Y = screenY };
+        if (!ScreenToClient(window, ref point))
+        {
+            clientX = clientY = 0;
+            return false;
+        }
+        clientX = point.X;
+        clientY = point.Y;
+        return true;
+    }
+
     [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X; public int Y; }
     [DllImport("user32.dll")] private static extern bool GetClientRect(nint window, out RECT rect);
+    [DllImport("user32.dll")] private static extern bool ScreenToClient(nint window, ref POINT point);
+    [DllImport("user32.dll")] private static extern nint GetAncestor(nint hwnd, uint flags);
     [DllImport("user32.dll", EntryPoint = "GetForegroundWindow")] private static extern nint GetForegroundWindowNative();
+    private const uint GaRoot = 2;
 }
 
 internal static class WindowAppearance

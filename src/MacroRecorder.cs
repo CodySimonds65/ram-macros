@@ -6,16 +6,19 @@ public sealed class MacroRecorder
 {
     private readonly object _gate = new();
     private readonly Func<nint> _foregroundWindow;
+    private readonly Func<nint, nint, bool> _windowMatches;
     private readonly Func<nint, bool, (int X, int Y, int Width, int Height)> _clientMetrics;
     private readonly Stopwatch _clock = new();
     private readonly List<MacroEvent> _events = [];
     private IReadOnlyDictionary<nint, RecorderWindow> _windows = new Dictionary<nint, RecorderWindow>();
 
     public MacroRecorder(Func<nint>? foregroundWindow = null,
-        Func<nint, bool, (int X, int Y, int Width, int Height)>? clientMetrics = null)
+        Func<nint, bool, (int X, int Y, int Width, int Height)>? clientMetrics = null,
+        Func<nint, nint, bool>? windowMatches = null)
     {
         _foregroundWindow = foregroundWindow ?? (() => nint.Zero);
         _clientMetrics = clientMetrics ?? ((_, _) => default);
+        _windowMatches = windowMatches ?? ((foreground, target) => foreground == target);
     }
 
     public void Start(IEnumerable<RecorderWindow> windows)
@@ -39,7 +42,7 @@ public sealed class MacroRecorder
         lock (_gate)
         {
             if (!_windows.ContainsKey(window.WindowHandle)) return false;
-            if (!multiWindow && _foregroundWindow() != window.WindowHandle) return false;
+            if (!multiWindow && !_windowMatches(_foregroundWindow(), window.WindowHandle)) return false;
             var metrics = _clientMetrics(window.WindowHandle, false);
             var width = metrics.Width > 0 ? metrics.Width : window.ClientWidth;
             var height = metrics.Height > 0 ? metrics.Height : window.ClientHeight;

@@ -2,7 +2,8 @@ using System.Runtime.InteropServices;
 
 namespace RamMacros;
 
-public sealed record CapturedInput(MacroEvent Event, nint WindowHandle, int ClientX, int ClientY, bool Injected);
+public sealed record CapturedInput(MacroEvent Event, nint WindowHandle, int ClientX, int ClientY, bool Injected,
+    int ScreenX = 0, int ScreenY = 0);
 
 /// <summary>
 /// Captures low-level input without activating or sending input to any window.
@@ -121,7 +122,7 @@ public sealed class GlobalInputCapture : IDisposable
                     {
                         _lastMousePoint = data.Point;
                         _hasLastMousePoint = true;
-                        _callback?.Invoke(new CapturedInput(new MacroEvent { Kind = kind.Value, Button = button, WheelDelta = wheel }, window, clientX, clientY, (data.Flags & LlMhfInjected) != 0));
+                        _callback?.Invoke(new CapturedInput(new MacroEvent { Kind = kind.Value, Button = button, WheelDelta = wheel }, window, clientX, clientY, (data.Flags & LlMhfInjected) != 0, data.Point.X, data.Point.Y));
                     }
                 }
             }

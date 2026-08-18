@@ -1,4 +1,5 @@
 using RamMacros;
+using System.Text.Json;
 
 static void Require(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
 var input = new MacroEvent { NormalizedX = 0.5, NormalizedY = 0.25 };
@@ -17,6 +18,9 @@ diagnostics.Info("hook started");
 diagnostics.Warning(new string('x', 2_100));
 Require(diagnosticCount == 2 && diagnostics.Snapshot().Count == 2, "Diagnostics entries were not retained and raised.");
 Require(diagnostics.Snapshot()[1].Message.Length == 2_000, "Diagnostic messages were not bounded.");
+using var snapshotDocument = JsonDocument.Parse("{\"accountId\":\"a\",\"label\":\"A\",\"processId\":1,\"processStartTimeUtcTicks\":1,\"windowHandle\":42,\"clientX\":0,\"clientY\":0,\"clientWidth\":100,\"clientHeight\":100,\"dpi\":96,\"isMinimized\":false,\"lastActivityUtc\":\"2026-01-01T00:00:00Z\",\"isRunning\":true,\"rootWindowHandle\":41}");
+var decodedSnapshot = PluginClient.Deserialize<ManagedAccountSnapshot>(snapshotDocument.RootElement);
+Require(decodedSnapshot?.WindowHandle == (nint)42 && decodedSnapshot.RootWindowHandle == (nint)41, "Managed-account HWND wire deserialization failed.");
 var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".ramacro");
 try
 {

@@ -47,8 +47,11 @@ jobs:
           if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Release version must be semantic version vMAJOR.MINOR.PATCH; received '$tag'." }
           $plugin = Get-Content -Raw -LiteralPath 'plugin.json' | ConvertFrom-Json
           $manifest = Get-Content -Raw -LiteralPath 'manifest.json' | ConvertFrom-Json
+          [xml]$project = Get-Content -Raw -LiteralPath 'ram-macros.csproj'
+          $projectVersion = [string]$project.Project.PropertyGroup.Version
           if ($plugin.id -ne $env:PLUGIN_ID -or $manifest.id -ne $env:PLUGIN_ID) { throw "Plugin identity does not match '$env:PLUGIN_ID'." }
           if ($plugin.version -ne $manifest.version) { throw "plugin.json and manifest.json versions must match." }
+          if ($projectVersion -ne $plugin.version) { throw "ram-macros.csproj Version '$projectVersion' does not match plugin version '$($plugin.version)'." }
           if ($plugin.version -ne $tag.Substring(1)) { throw "Plugin version '$($plugin.version)' does not match release tag '$tag'." }
 
           $tagCommit = (git rev-list -n 1 $tag 2>$null)
@@ -92,6 +95,7 @@ jobs:
       contents: write
     env:
       PLUGIN_NAME: RAM Macros
+      PLUGIN_ID: io.github.codysimonds65.ram.macros
 
     steps:
       - name: Download unsigned package
@@ -125,7 +129,98 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RAM_PLUGIN_SIGNING_PUBLIC_KEY: ${{ secrets.RAM_PLUGIN_SIGNING_PUBLIC_KEY }}
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
           RELEASE_TARGET: ${{ needs.build.outputs.commit }}
         run: |
-          gh release create $env:RELEASE_TAG '.\release\plugin.json#plugin.json' '.\release\plugin.zip#plugin.zip' '.\release\plugin.sha256#plugin.sha256' '.\release\plugin.sig#plugin.sig' --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_TARGET --title "$env:PLUGIN_NAME $env:RELEASE_TAG" --generate-notes --fail-on-no-commits
+          function Get-ReleaseMetadata {
+              $json = & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json tagName,targetCommitish,isDraft,isPrerelease,assets 2>$null
+              if ($LASTEXITCODE -ne 0) { return $null }
+              try { return ($json | ConvertFrom-Json) } catch { throw "Existing release metadata is not valid JSON." }
+          }
+
+          function Test-CompleteRelease {
+              param([object]$Release)
+              if ($null -eq $Release -or $Release.tagName -ne $env:RELEASE_TAG -or $Release.isDraft -or $Release.isPrerelease) { return $false }
+              if ([string]::IsNullOrWhiteSpace([string]$Release.targetCommitish) -or $Release.targetCommitish -ine $env:RELEASE_TARGET) { return $false }
+              $expected = @{
+                  'plugin.json' = 'positive'
+                  'plugin.zip' = 'positive'
+                  'plugin.sha256' = 'sha256'
+                  'plugin.sig' = 'signature'
+              }
+              foreach ($name in $expected.Keys) {
+                  $assets = @($Release.assets | Where-Object { $_.name -eq $name })
+                  if ($assets.Count -ne 1 -or $assets[0].state -ne 'uploaded' -or [int64]$assets[0].size -le 0 -or [string]$assets[0].digest -notmatch '^sha256:[0-9a-f]{64}$') { return $false }
+                  if ($expected[$name] -eq 'sha256' -and [int64]$assets[0].size -ne 64) { return $false }
+                  if ($expected[$name] -eq 'signature' -and [int64]$assets[0].size -ne 64) { return $false }
+              }
+
+              if ([string]::IsNullOrWhiteSpace($env:RAM_PLUGIN_SIGNING_PUBLIC_KEY)) { throw 'RAM_PLUGIN_SIGNING_PUBLIC_KEY is required to verify an existing release.' }
+              $verifyDir = Join-Path $env:RUNNER_TEMP ('release-verify-' + [guid]::NewGuid().ToString('N'))
+              $publicPath = Join-Path $verifyDir 'ram-plugin-signing-public.pem'
+              try {
+                  New-Item -ItemType Directory -Force -Path $verifyDir | Out-Null
+                  & gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --dir $verifyDir --clobber --pattern 'plugin.json' --pattern 'plugin.zip' --pattern 'plugin.sha256' --pattern 'plugin.sig' *> $null
+                  if ($LASTEXITCODE -ne 0) { return $false }
+
+                  $published = Get-Content -Raw -LiteralPath (Join-Path $verifyDir 'plugin.json') | ConvertFrom-Json
+                  if ($published.id -ne $env:PLUGIN_ID -or $published.version -ne $env:RELEASE_TAG.Substring(1)) { return $false }
+                  $expectedHash = (Get-Content -Raw -LiteralPath (Join-Path $verifyDir 'plugin.sha256')).Trim().ToLowerInvariant()
+                  if ($expectedHash -notmatch '^[0-9a-f]{64}$') { return $false }
+                  $actualHash = (Get-FileHash -LiteralPath (Join-Path $verifyDir 'plugin.zip') -Algorithm SHA256).Hash.ToLowerInvariant()
+                  if ($actualHash -ne $expectedHash) { return $false }
+
+                  $zipPath = Join-Path $verifyDir 'plugin.zip'
+                  Add-Type -AssemblyName System.IO.Compression.ZipFile
+                  $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
+                  try {
+                      $maxEntryBytes = 256MB
+                      $maxTotalBytes = 512MB
+                      $totalBytes = [int64]0
+                      foreach ($entry in $archive.Entries) {
+                          $normalizedName = $entry.FullName.Replace('\', '/')
+                          if ([string]::IsNullOrWhiteSpace($normalizedName) -or $normalizedName.StartsWith('/') -or $normalizedName -match '(^|/)\.\.(\/|$)' -or $entry.Length -lt 0 -or $entry.Length -gt $maxEntryBytes) { return $false }
+                          $totalBytes += [int64]$entry.Length
+                          if ($totalBytes -gt $maxTotalBytes) { return $false }
+                      }
+                      $manifestEntries = @($archive.Entries | Where-Object { $_.FullName -eq 'plugin.json' })
+                      if ($manifestEntries.Count -ne 1 -or $manifestEntries[0].Length -gt 1MB) { return $false }
+                      $reader = New-Object IO.StreamReader($manifestEntries[0].Open(), [Text.Encoding]::UTF8, $true)
+                      try { $packaged = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+                  } finally {
+                      $archive.Dispose()
+                  }
+                  if ($packaged.id -ne $published.id -or $packaged.version -ne $published.version) { return $false }
+
+                  [IO.File]::WriteAllText($publicPath, $env:RAM_PLUGIN_SIGNING_PUBLIC_KEY, [Text.UTF8Encoding]::new($false))
+                  & openssl pkeyutl -verify -pubin -inkey $publicPath -in $zipPath -sigfile (Join-Path $verifyDir 'plugin.sig') *> $null
+                  if ($LASTEXITCODE -ne 0) { return $false }
+                  return $true
+              } finally {
+                  Remove-Item -LiteralPath $verifyDir -Recurse -Force -ErrorAction SilentlyContinue
+              }
+          }
+
+          $existing = Get-ReleaseMetadata
+          if ($null -ne $existing) {
+              if (Test-CompleteRelease $existing) {
+                  "Release $env:RELEASE_TAG already exists with the expected target and assets; treating this retry as successful." >> $env:GITHUB_STEP_SUMMARY
+                  exit 0
+              }
+              throw "Release $env:RELEASE_TAG exists but is incomplete or targets the wrong commit; refusing to mask a partial publication."
+          }
+
+          $createOutput = & gh release create $env:RELEASE_TAG '.\release\plugin.json#plugin.json' '.\release\plugin.zip#plugin.zip' '.\release\plugin.sha256#plugin.sha256' '.\release\plugin.sig#plugin.sig' --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_TARGET --title "$env:PLUGIN_NAME $env:RELEASE_TAG" --generate-notes --fail-on-no-commits 2>&1
+          $createExitCode = $LASTEXITCODE
+          $createOutput | ForEach-Object { Write-Output $_ }
+          if ($createExitCode -eq 0) { exit 0 }
+
+          # A concurrent retry may have won the create race. Re-check before
+          # failing so the release remains idempotent.
+          $existing = Get-ReleaseMetadata
+          if ($null -ne $existing -and (Test-CompleteRelease $existing)) {
+              "Release $env:RELEASE_TAG was created by a concurrent retry with the expected target and assets; treating this run as successful." >> $env:GITHUB_STEP_SUMMARY
+              exit 0
+          }
+          throw "GitHub release creation failed with exit code $createExitCode."

@@ -13,16 +13,25 @@ public partial class MainWindow : Window
     private readonly MacroRecorder _recorder;
     private readonly GlobalInputCapture _inputCapture = new();
     private readonly ManagedAccountRegistry _managedAccounts;
+    private readonly DiagnosticsLog _diagnostics;
     private MacroDefinition? _selected;
     private bool _recording;
     private nint _recordingWindow;
     private nint _windowHandle;
     private int _eventRefreshPending;
+    private int _capturedInputCount;
+    private int _ignoredInjectedCount;
+    private int _rejectedEventCount;
+    private DateTime _lastUnmanagedDiagnosticUtc;
+    private DateTime _lastRejectedDiagnosticUtc;
 
-    public MainWindow(ManagedAccountRegistry? managedAccounts = null)
+    public MainWindow(ManagedAccountRegistry? managedAccounts = null, DiagnosticsLog? diagnostics = null)
     {
         InitializeComponent();
         _managedAccounts = managedAccounts ?? new ManagedAccountRegistry();
+        _diagnostics = diagnostics ?? new DiagnosticsLog();
+        _diagnostics.Added += Diagnostics_Added;
+        _managedAccounts.Changed += ManagedAccounts_Changed;
         MacroList.ItemsSource = _macros;
         WindowAppearance.Apply(this);
         _recorder = new MacroRecorder(
@@ -54,11 +63,37 @@ public partial class MainWindow : Window
         _selected = MacroList.SelectedItem as MacroDefinition;
         RefreshEventList();
     }
+
+    private void Diagnostics_Added(object? sender, DiagnosticEntry entry)
+    {
+        if (Dispatcher.CheckAccess()) AddDiagnosticToList(entry);
+        else
+        {
+            try { Dispatcher.BeginInvoke(new Action(() => AddDiagnosticToList(entry))); }
+            catch (InvalidOperationException) when (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) { }
+            catch (TaskCanceledException) { }
+        }
+    }
+
+    private void AddDiagnosticToList(DiagnosticEntry entry)
+    {
+        DiagnosticsList.Items.Add(entry.ToString());
+        while (DiagnosticsList.Items.Count > 80) DiagnosticsList.Items.RemoveAt(0);
+        DiagnosticsList.ScrollIntoView(entry.ToString());
+    }
+
+    private void ManagedAccounts_Changed(object? sender, int count) =>
+        _diagnostics.Info($"Managed-account registry: {count} usable Roblox window(s).");
+
+    private void Diagnostic(string message) => _diagnostics.Info(message);
+    private void DiagnosticWarning(string message) => _diagnostics.Warning(message);
+    private void DiagnosticError(string message) => _diagnostics.Error(message);
     private void Record_Click(object sender, RoutedEventArgs e)
     {
         if (_selected is null)
         {
             StatusText.Text = "Create or select a macro first.";
+            DiagnosticWarning("Record requested without a selected macro.");
             return;
         }
         if (_recording)
@@ -71,11 +106,16 @@ public partial class MainWindow : Window
         if (_managedAccounts.Snapshot().Count == 0 && foreground != _windowHandle)
         {
             StatusText.Text = "No running managed Roblox windows are available. Start an account and try again.";
+            DiagnosticWarning("Record blocked: no usable managed Roblox windows are available.");
             return;
         }
 
         _recording = true;
         _recordingWindow = nint.Zero;
+        _capturedInputCount = 0;
+        _ignoredInjectedCount = 0;
+        _rejectedEventCount = 0;
+        _lastRejectedDiagnosticUtc = DateTime.MinValue;
         _recorder.Start([]);
         try
         {
@@ -87,6 +127,7 @@ public partial class MainWindow : Window
             _recording = false;
             _recordingWindow = nint.Zero;
             StatusText.Text = $"Could not start recording.\n{ex.Message}";
+            DiagnosticError($"Global input hooks failed to start: {ex.Message}");
             return;
         }
         RecordButton.Content = "■  Stop recording";
@@ -94,15 +135,34 @@ public partial class MainWindow : Window
         StatusText.Text = foreground == _windowHandle
             ? "Recording armed. Activate a managed Roblox window; events will appear here."
             : "Recording managed window input...\nTarget will bind to the active Roblox client.";
+        Diagnostic(foreground == _windowHandle
+            ? "Recording armed while the RAM Macros panel is foreground; panel input will be ignored."
+            : "Recording started with a Roblox client foreground.");
     }
 
     private void HandleCapturedInput(CapturedInput captured)
     {
         if (!_recording || captured.WindowHandle == _windowHandle) return;
+        var capturedCount = Interlocked.Increment(ref _capturedInputCount);
+        if (capturedCount == 1)
+            Diagnostic($"Input hook observed {captured.Event.Kind} on foreground HWND 0x{captured.WindowHandle.ToInt64():X}.");
         // Filter before binding a target. Injected input must never be able to
         // select a window or enter the recorded sequence.
-        if (captured.Injected) return;
-        if (!_managedAccounts.TryResolve(captured.WindowHandle, out var account)) return;
+        if (captured.Injected)
+        {
+            var ignored = Interlocked.Increment(ref _ignoredInjectedCount);
+            if (ignored == 1) Diagnostic("Ignored injected input from the recording hook.");
+            return;
+        }
+        if (!_managedAccounts.TryResolve(captured.WindowHandle, out var account))
+        {
+            if (DateTime.UtcNow - _lastUnmanagedDiagnosticUtc > TimeSpan.FromSeconds(2))
+            {
+                _lastUnmanagedDiagnosticUtc = DateTime.UtcNow;
+                DiagnosticWarning("Ignored input from an unmanaged foreground window.");
+            }
+            return;
+        }
         var targetWindow = account.WindowHandle;
         var clientX = captured.ClientX;
         var clientY = captured.ClientY;
@@ -116,6 +176,7 @@ public partial class MainWindow : Window
             var metrics = NativeWindowMetrics.GetClientMetrics(_recordingWindow);
             _recorder.Start([new RecorderWindow("default", _recordingWindow, metrics.Width, metrics.Height)]);
             QueueUi(() => StatusText.Text = $"Recording {account.Label} input...\nTarget bound to the managed window.");
+            Diagnostic($"Bound recording target to {account.Label} (HWND 0x{account.WindowHandle.ToInt64():X}).");
         }
 
         var metricsNow = NativeWindowMetrics.GetClientMetrics(targetWindow);
@@ -123,6 +184,17 @@ public partial class MainWindow : Window
         if (_recorder.TryRecord(recorderWindow, captured.Event, clientX, clientY, captured.Injected, multiWindow: false))
         {
             QueueEventListRefresh();
+            var count = _recorder.Snapshot().Count;
+            if (count == 1 || count % 25 == 0) Diagnostic($"Captured {count} event(s) for {account.Label}.");
+        }
+        else
+        {
+            var rejected = Interlocked.Increment(ref _rejectedEventCount);
+            if (rejected == 1 || DateTime.UtcNow - _lastRejectedDiagnosticUtc >= TimeSpan.FromSeconds(2))
+            {
+                _lastRejectedDiagnosticUtc = DateTime.UtcNow;
+                DiagnosticWarning($"Input hook event was rejected for {account.Label}; check foreground/window bounds.");
+            }
         }
     }
 
@@ -164,6 +236,7 @@ public partial class MainWindow : Window
         }
         RefreshEventList();
         StatusText.Text = $"Recording stopped.\n{events.Count} event(s) captured.";
+        Diagnostic($"Recording stopped with {events.Count} event(s); hook observed {_capturedInputCount}, ignored {_ignoredInjectedCount} injected, rejected {_rejectedEventCount}.");
     }
 
     private void RefreshEventList()
@@ -178,6 +251,8 @@ public partial class MainWindow : Window
     private void Reset_Click(object sender, RoutedEventArgs e) => StatusText.Text = "RESET requested with SWP_NOACTIVATE.";
     protected override void OnClosed(EventArgs e)
     {
+        _diagnostics.Added -= Diagnostics_Added;
+        _managedAccounts.Changed -= ManagedAccounts_Changed;
         _inputCapture.Dispose();
         base.OnClosed(e);
     }

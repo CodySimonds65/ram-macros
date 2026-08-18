@@ -4,7 +4,8 @@
     <Style TargetType="Window"><Setter Property="FontFamily" Value="Segoe UI Variable Text"/></Style>
     <Style TargetType="TextBox"><Setter Property="Background" Value="#171B24"/><Setter Property="Foreground" Value="#F5F7FA"/><Setter Property="BorderBrush" Value="#272D3A"/><Setter Property="CaretBrush" Value="#F5F7FA"/></Style>
     <Style TargetType="ListBox"><Setter Property="Background" Value="#171B24"/><Setter Property="Foreground" Value="#F5F7FA"/><Setter Property="BorderBrush" Value="#272D3A"/></Style>
-    <Style TargetType="ListBoxItem">
+    <Style x:Key="DarkListBoxItem" TargetType="ListBoxItem">
+      <Setter Property="OverridesDefaultStyle" Value="True"/>
       <Setter Property="Foreground" Value="#F5F7FA"/>
       <Setter Property="Background" Value="#1D2230"/>
       <Setter Property="BorderBrush" Value="#272D3A"/>
@@ -32,5 +33,6 @@
         </Setter.Value>
       </Setter>
     </Style>
+    <Style TargetType="ListBoxItem" BasedOn="{StaticResource DarkListBoxItem}"/>
   </Application.Resources>
 </Application>

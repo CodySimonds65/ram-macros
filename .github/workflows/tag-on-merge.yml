@@ -1,0 +1,93 @@
+name: Tag merged plugin release
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [closed]
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: tag-release-ram-macros
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: github.event.pull_request.merged == true
+    runs-on: windows-latest
+    env:
+      PLUGIN_ID: io.github.codysimonds65.ram.macros
+      PLUGIN_NAME: RAM Macros
+      MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+
+    steps:
+      - name: Check out the merged commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Validate version and determine whether to publish
+        id: version
+        shell: pwsh
+        run: |
+          $plugin = Get-Content -Raw -LiteralPath 'plugin.json' | ConvertFrom-Json
+          $manifest = Get-Content -Raw -LiteralPath 'manifest.json' | ConvertFrom-Json
+          if ($plugin.id -ne $env:PLUGIN_ID -or $manifest.id -ne $env:PLUGIN_ID) {
+              throw "Plugin identity does not match '$env:PLUGIN_ID'."
+          }
+          if ($plugin.version -ne $manifest.version) {
+              throw "plugin.json version '$($plugin.version)' does not match manifest.json version '$($manifest.version)'."
+          }
+          if ($plugin.version -notmatch '^\d+\.\d+\.\d+$') {
+              throw "Plugin version '$($plugin.version)' is not MAJOR.MINOR.PATCH."
+          }
+
+          $version = [version]$plugin.version
+          $existing = @(git tag --list "v$($plugin.version)")
+          if ($existing.Count -gt 0) {
+              "publish=false" >> $env:GITHUB_OUTPUT
+              "No release needed: v$($plugin.version) already exists." >> $env:GITHUB_STEP_SUMMARY
+              exit 0
+          }
+
+          $latest = @(git tag --list 'v*' | ForEach-Object {
+              if ($_ -match '^v(\d+)\.(\d+)\.(\d+)$') {
+                  [pscustomobject]@{ Tag = $_; Version = [version]$_.Substring(1) }
+              }
+          } | Sort-Object Version -Descending | Select-Object -First 1)
+          if ($latest.Count -gt 0 -and $version -le $latest[0].Version) {
+              throw "Plugin version $version must be newer than the latest published tag $($latest[0].Tag)."
+          }
+
+          $tag = "v$($plugin.version)"
+          "publish=true" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$($plugin.version)" >> $env:GITHUB_OUTPUT
+          "### Release candidate" >> $env:GITHUB_STEP_SUMMARY
+          "- $env:PLUGIN_NAME $tag" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Create and push release tag
+        if: steps.version.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a $env:RELEASE_TAG $env:MERGE_SHA -m "$env:PLUGIN_NAME $env:RELEASE_TAG"
+          git push origin $env:RELEASE_TAG
+
+      - name: Start signed package release
+        if: steps.version.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh workflow run release.yml --repo $env:GITHUB_REPOSITORY --ref $env:RELEASE_TAG --field version=$env:RELEASE_VERSION
+          "Publishing was queued for $env:RELEASE_TAG. The release workflow will build, sign, verify, and publish the package." >> $env:GITHUB_STEP_SUMMARY

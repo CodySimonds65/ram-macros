@@ -12,10 +12,21 @@ public sealed class ManagedAccountRegistry
 {
     private readonly object _gate = new();
     private IReadOnlyList<ManagedAccountSnapshot> _accounts = [];
+    private int _lastCount = -1;
+
+    public event EventHandler<int>? Changed;
 
     public void Replace(IReadOnlyList<ManagedAccountSnapshot> accounts)
     {
-        lock (_gate) _accounts = accounts.Where(IsUsable).ToArray();
+        int count;
+        lock (_gate)
+        {
+            _accounts = accounts.Where(IsUsable).ToArray();
+            count = _accounts.Count;
+            if (count == _lastCount) return;
+            _lastCount = count;
+        }
+        Changed?.Invoke(this, count);
     }
 
     public IReadOnlyList<ManagedAccountSnapshot> Snapshot()

@@ -6,9 +6,34 @@ public partial class App : Application
 {
     private PluginClient? _client;
     private InputPostSender? _sender;
+    private int _recordHotkeyVk = 0x78;
+    private int _playHotkeyVk = 0x77;
     public ManagedAccountRegistry ManagedAccounts { get; } = new();
     public DiagnosticsLog Diagnostics { get; } = new();
     public PlaybackController Playback { get; private set; } = null!;
+    public event EventHandler<int>? HotkeyPressed;
+    public event EventHandler<int>? HotkeyReleased;
+
+    public void UpdateHotkeySubscription(int recordHotkeyVk, int playHotkeyVk)
+    {
+        _recordHotkeyVk = recordHotkeyVk;
+        _playHotkeyVk = playHotkeyVk;
+        _ = SendHotkeySubscriptionAsync();
+    }
+
+    private Task SendHotkeySubscriptionAsync()
+    {
+        try
+        {
+            if (_client is null) return Task.CompletedTask;
+            return _client.SendAsync("hotkey.subscribe", new { virtualKeys = new[] { _recordHotkeyVk, _playHotkeyVk } }, Guid.NewGuid().ToString("N"));
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException)
+        {
+            // The host connection will re-subscribe on the next connect.
+            return Task.CompletedTask;
+        }
+    }
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -31,6 +56,7 @@ public partial class App : Application
             diagnostics.Info("Connecting to the launcher plugin host...");
             await client.ConnectAsync();
             diagnostics.Info("Launcher plugin host accepted the connection.");
+            _ = ((App)Current).SendHotkeySubscriptionAsync();
             forwardDiagnostic = (_, entry) => _ = SendDiagnosticAsync(client, entry, shutdown.Token);
             diagnostics.Added += forwardDiagnostic;
             await client.SendAsync("action.register", new { actionId = "io.github.codysimonds65.ram.macros.run", displayName = "Run RAM macro", description = "Run a named macro on selected managed accounts without focus changes.", argumentSchemaJson = "{\"type\":\"object\",\"properties\":{\"macroId\":{\"type\":\"string\"}}}", requiredCapabilities = new[] { "host.input.background" } });
@@ -40,6 +66,16 @@ public partial class App : Application
             while (true)
             {
                 var envelope = await client.ReceiveAsync(shutdown.Token); if (envelope is null) break;
+                if (envelope.Type is "hotkey.pressed" or "hotkey.released")
+                {
+                    if (envelope.Payload.TryGetProperty("virtualKey", out var keyElement) && keyElement.TryGetInt32(out var hotkeyVk))
+                    {
+                        var app = (App)Current;
+                        if (envelope.Type == "hotkey.pressed") app.HotkeyPressed?.Invoke(app, hotkeyVk);
+                        else app.HotkeyReleased?.Invoke(app, hotkeyVk);
+                    }
+                    continue;
+                }
                 if (envelope.Type == "input.result")
                 {
                     sender.HandleResult(envelope.RequestId, envelope.Payload);

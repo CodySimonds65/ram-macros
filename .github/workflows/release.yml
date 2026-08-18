@@ -158,7 +158,6 @@ jobs:
 
               if ([string]::IsNullOrWhiteSpace($env:RAM_PLUGIN_SIGNING_PUBLIC_KEY)) { throw 'RAM_PLUGIN_SIGNING_PUBLIC_KEY is required to verify an existing release.' }
               $verifyDir = Join-Path $env:RUNNER_TEMP ('release-verify-' + [guid]::NewGuid().ToString('N'))
-              $extractDir = Join-Path $verifyDir 'package'
               $publicPath = Join-Path $verifyDir 'ram-plugin-signing-public.pem'
               try {
                   New-Item -ItemType Directory -Force -Path $verifyDir | Out-Null
@@ -172,13 +171,30 @@ jobs:
                   $actualHash = (Get-FileHash -LiteralPath (Join-Path $verifyDir 'plugin.zip') -Algorithm SHA256).Hash.ToLowerInvariant()
                   if ($actualHash -ne $expectedHash) { return $false }
 
-                  New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-                  Expand-Archive -LiteralPath (Join-Path $verifyDir 'plugin.zip') -DestinationPath $extractDir -Force
-                  $packaged = Get-Content -Raw -LiteralPath (Join-Path $extractDir 'plugin.json') | ConvertFrom-Json
+                  $zipPath = Join-Path $verifyDir 'plugin.zip'
+                  Add-Type -AssemblyName System.IO.Compression.ZipFile
+                  $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
+                  try {
+                      $maxEntryBytes = 256MB
+                      $maxTotalBytes = 512MB
+                      $totalBytes = [int64]0
+                      foreach ($entry in $archive.Entries) {
+                          $normalizedName = $entry.FullName.Replace('\', '/')
+                          if ([string]::IsNullOrWhiteSpace($normalizedName) -or $normalizedName.StartsWith('/') -or $normalizedName -match '(^|/)\.\.(\/|$)' -or $entry.Length -lt 0 -or $entry.Length -gt $maxEntryBytes) { return $false }
+                          $totalBytes += [int64]$entry.Length
+                          if ($totalBytes -gt $maxTotalBytes) { return $false }
+                      }
+                      $manifestEntries = @($archive.Entries | Where-Object { $_.FullName -eq 'plugin.json' })
+                      if ($manifestEntries.Count -ne 1 -or $manifestEntries[0].Length -gt 1MB) { return $false }
+                      $reader = New-Object IO.StreamReader($manifestEntries[0].Open(), [Text.Encoding]::UTF8, $true)
+                      try { $packaged = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+                  } finally {
+                      $archive.Dispose()
+                  }
                   if ($packaged.id -ne $published.id -or $packaged.version -ne $published.version) { return $false }
 
                   [IO.File]::WriteAllText($publicPath, $env:RAM_PLUGIN_SIGNING_PUBLIC_KEY, [Text.UTF8Encoding]::new($false))
-                  & openssl pkeyutl -verify -pubin -inkey $publicPath -in (Join-Path $verifyDir 'plugin.zip') -sigfile (Join-Path $verifyDir 'plugin.sig') *> $null
+                  & openssl pkeyutl -verify -pubin -inkey $publicPath -in $zipPath -sigfile (Join-Path $verifyDir 'plugin.sig') *> $null
                   if ($LASTEXITCODE -ne 0) { return $false }
                   return $true
               } finally {

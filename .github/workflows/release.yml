@@ -227,6 +227,15 @@ jobs:
           $createOutput = & gh release create $env:RELEASE_TAG '.\release\plugin.json#plugin.json' '.\release\plugin.zip#plugin.zip' '.\release\plugin.sha256#plugin.sha256' '.\release\plugin.sig#plugin.sig' --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_TARGET --title "$env:PLUGIN_NAME $env:RELEASE_TAG" --generate-notes --fail-on-no-commits 2>&1
           $createExitCode = $LASTEXITCODE
           $createOutput | ForEach-Object { Write-Output $_ }
+          # Release-only child commits are never ancestors of the previous
+          # release tag, so GitHub's notes generator reports an empty compare
+          # and --fail-on-no-commits rejects the release. Retry with static
+          # notes so the tag can still be published.
+          if ($createExitCode -ne 0) {
+              $createOutput = & gh release create $env:RELEASE_TAG '.\release\plugin.json#plugin.json' '.\release\plugin.zip#plugin.zip' '.\release\plugin.sha256#plugin.sha256' '.\release\plugin.sig#plugin.sig' --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_TARGET --title "$env:PLUGIN_NAME $env:RELEASE_TAG" --notes "$env:PLUGIN_NAME $env:RELEASE_TAG" 2>&1
+              $createExitCode = $LASTEXITCODE
+              $createOutput | ForEach-Object { Write-Output $_ }
+          }
           if ($createExitCode -eq 0) { exit 0 }
 
           # A concurrent retry may have won the create race. Re-check before

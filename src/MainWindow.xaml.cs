@@ -20,11 +20,10 @@ public partial class MainWindow : Window
     private readonly DiagnosticsLog _diagnostics;
     private MacroDefinition? _selected;
     private bool _recording;
-    private bool _panelMode;
     private bool _panelBound;
-    private bool _minimizedForRecording;
     private nint _recordingWindow;
     private nint _panelTargetWindow;
+    private string? _recordingAccountId;
     private nint _windowHandle;
     private int _eventRefreshPending;
     private int _capturedInputCount;
@@ -34,6 +33,15 @@ public partial class MainWindow : Window
     private DateTime _lastRejectedDiagnosticUtc;
     private bool _standaloneRecording;
     private int _recordHotkeyVk = 0x78;
+    private int _playHotkeyVk = 0x77;
+    private readonly HashSet<string> _targetAccountIds = new(StringComparer.Ordinal);
+    private bool _targetsTouched;
+    private HwndSource? _hwndSource;
+    private DispatcherTimer? _holdTimer;
+    private const int WmHotkey = 0x0312;
+    private const int RecordHotkeyId = 0x5243;
+    private const int PlayHotkeyId = 0x504C;
+    private const uint ModNoRepeat = 0x4000;
     private readonly string _storageDirectory;
     private readonly string _libraryPath;
 
@@ -58,10 +66,21 @@ public partial class MainWindow : Window
                 return (0, 0, metrics.Width, metrics.Height);
             },
             NativeWindowMetrics.IsSameWindowTree);
-        SourceInitialized += (_, _) => _windowHandle = new WindowInteropHelper(this).Handle;
+        SourceInitialized += (_, _) =>
+        {
+            _windowHandle = new WindowInteropHelper(this).Handle;
+            _hwndSource = HwndSource.FromHwnd(_windowHandle);
+            _hwndSource?.AddHook(WndProc);
+            RegisterHotkeys();
+        };
         LoadSettings();
         LoadLibrary();
-        HotkeyButton.Content = $"Hotkey: {KeyName(_recordHotkeyVk)}";
+        RecordHotkeyButton.Content = $"Record hotkey: {KeyName(_recordHotkeyVk)}";
+        PlayHotkeyButton.Content = $"Play hotkey: {KeyName(_playHotkeyVk)}";
+        PlayModeCombo.SelectionChanged += (_, _) => RepeatCountBox.IsEnabled = PlayModeCombo.SelectedIndex == 1;
+        RefreshAccountTargets();
+        var app = Application.Current as App;
+        if (app?.Playback is not null) app.Playback.StateChanged += Playback_StateChanged;
     }
 
     private void LoadLibrary()
@@ -101,9 +120,12 @@ public partial class MainWindow : Window
         {
             if (!File.Exists(SettingsPath)) return;
             using var document = JsonDocument.Parse(File.ReadAllText(SettingsPath));
-            if (document.RootElement.TryGetProperty("recordHotkey", out var hotkey) &&
-                hotkey.TryGetInt32(out var vk) && vk is >= 1 and <= 255)
-                _recordHotkeyVk = vk;
+            if (document.RootElement.TryGetProperty("recordHotkey", out var recordHotkey) &&
+                recordHotkey.TryGetInt32(out var recordVk) && recordVk is >= 1 and <= 255)
+                _recordHotkeyVk = recordVk;
+            if (document.RootElement.TryGetProperty("playHotkey", out var playHotkey) &&
+                playHotkey.TryGetInt32(out var playVk) && playVk is >= 1 and <= 255)
+                _playHotkeyVk = playVk;
         }
         catch
         {
@@ -115,12 +137,81 @@ public partial class MainWindow : Window
     {
         try
         {
-            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(new { recordHotkey = _recordHotkeyVk }));
+            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(new { recordHotkey = _recordHotkeyVk, playHotkey = _playHotkeyVk }));
         }
         catch
         {
-            // Settings are best-effort; the hotkey still applies for this session.
+            // Settings are best-effort; the hotkeys still apply for this session.
         }
+    }
+
+    private void RegisterHotkeys()
+    {
+        if (_hwndSource is null) return;
+        UnregisterHotkeys();
+        if (!RegisterHotKey(_windowHandle, RecordHotkeyId, ModNoRepeat, (uint)_recordHotkeyVk))
+            DiagnosticWarning($"Could not register the record hotkey {KeyName(_recordHotkeyVk)}; another application may be using it.");
+        if (!RegisterHotKey(_windowHandle, PlayHotkeyId, ModNoRepeat, (uint)_playHotkeyVk))
+            DiagnosticWarning($"Could not register the play hotkey {KeyName(_playHotkeyVk)}; another application may be using it.");
+    }
+
+    private void UnregisterHotkeys()
+    {
+        if (_windowHandle == nint.Zero) return;
+        UnregisterHotKey(_windowHandle, RecordHotkeyId);
+        UnregisterHotKey(_windowHandle, PlayHotkeyId);
+    }
+
+    private nint WndProc(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
+    {
+        if (message == WmHotkey)
+        {
+            handled = true;
+            var hotkeyId = wParam.ToInt32();
+            if (hotkeyId == RecordHotkeyId)
+            {
+                if (!_recording) StartRecording();
+            }
+            else if (hotkeyId == PlayHotkeyId)
+            {
+                TogglePlaybackFromHotkey();
+            }
+        }
+        return nint.Zero;
+    }
+
+    private void TogglePlaybackFromHotkey()
+    {
+        var app = Application.Current as App;
+        if (app?.Playback is null || _recording) return;
+        if (app.Playback.IsPlaying)
+        {
+            StopHoldTimer();
+            app.Playback.Stop();
+            return;
+        }
+        if (TryStartPlayback() && PlayModeCombo.SelectedIndex == 3)
+            StartHoldTimer();
+    }
+
+    private void StartHoldTimer()
+    {
+        StopHoldTimer();
+        var heldVk = _playHotkeyVk;
+        _holdTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        _holdTimer.Tick += (_, _) =>
+        {
+            if (GetAsyncKeyState(heldVk) < 0) return;
+            StopHoldTimer();
+            (Application.Current as App)?.Playback.Stop();
+        };
+        _holdTimer.Start();
+    }
+
+    private void StopHoldTimer()
+    {
+        _holdTimer?.Stop();
+        _holdTimer = null;
     }
 
     private void NewMacro_Click(object sender, RoutedEventArgs e)
@@ -239,6 +330,7 @@ public partial class MainWindow : Window
     {
         _selected = MacroList.SelectedItem as MacroDefinition;
         RefreshEventList();
+        RefreshAccountTargets();
     }
 
     private void Diagnostics_Added(object? sender, DiagnosticEntry entry)
@@ -259,8 +351,11 @@ public partial class MainWindow : Window
         DiagnosticsList.ScrollIntoView(entry.ToString());
     }
 
-    private void ManagedAccounts_Changed(object? sender, int count) =>
+    private void ManagedAccounts_Changed(object? sender, int count)
+    {
         _diagnostics.Info($"Managed-account registry: {count} usable Roblox window(s).");
+        RefreshAccountTargets();
+    }
 
     private void Diagnostic(string message) => _diagnostics.Info(message);
     private void DiagnosticWarning(string message) => _diagnostics.Warning(message);
@@ -297,11 +392,45 @@ public partial class MainWindow : Window
         }
     }
 
-    private void Hotkey_Click(object sender, RoutedEventArgs e)
+    private void RecordHotkey_Click(object sender, RoutedEventArgs e)
     {
-        if (_recording) { StatusText.Text = "Stop recording before changing the hotkey."; return; }
-        var capture = new TextBox { Text = KeyName(_recordHotkeyVk), MinWidth = 260, Padding = new Thickness(8, 5, 8, 5), Background = new SolidColorBrush(Color.FromRgb(23, 27, 36)), Foreground = System.Windows.Media.Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(39, 45, 58)), CaretBrush = System.Windows.Media.Brushes.White, Margin = new Thickness(0, 0, 0, 6) };
-        var selectedVk = _recordHotkeyVk;
+        var (changed, vk) = CaptureHotkey("Recording hotkey", "The hotkey starts and stops recording globally.", _recordHotkeyVk);
+        if (!changed) return;
+        if (vk == _playHotkeyVk)
+        {
+            StatusText.Text = "The record hotkey must differ from the play hotkey.";
+            DiagnosticWarning("The record hotkey must differ from the play hotkey.");
+            return;
+        }
+        _recordHotkeyVk = vk;
+        RecordHotkeyButton.Content = $"Record hotkey: {KeyName(_recordHotkeyVk)}";
+        SaveSettings();
+        RegisterHotkeys();
+        Diagnostic($"Recording hotkey set to {KeyName(_recordHotkeyVk)}.");
+    }
+
+    private void PlayHotkey_Click(object sender, RoutedEventArgs e)
+    {
+        var (changed, vk) = CaptureHotkey("Playback hotkey", "The hotkey starts and stops macro playback; hold it for 'play while held'.", _playHotkeyVk);
+        if (!changed) return;
+        if (vk == _recordHotkeyVk)
+        {
+            StatusText.Text = "The play hotkey must differ from the record hotkey.";
+            DiagnosticWarning("The play hotkey must differ from the record hotkey.");
+            return;
+        }
+        _playHotkeyVk = vk;
+        PlayHotkeyButton.Content = $"Play hotkey: {KeyName(_playHotkeyVk)}";
+        SaveSettings();
+        RegisterHotkeys();
+        Diagnostic($"Playback hotkey set to {KeyName(_playHotkeyVk)}.");
+    }
+
+    private (bool Changed, int Vk) CaptureHotkey(string title, string description, int currentVk)
+    {
+        if (_recording) { StatusText.Text = "Stop recording before changing a hotkey."; return (false, currentVk); }
+        var capture = new TextBox { Text = KeyName(currentVk), MinWidth = 260, Padding = new Thickness(8, 5, 8, 5), Background = new SolidColorBrush(Color.FromRgb(23, 27, 36)), Foreground = System.Windows.Media.Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(39, 45, 58)), CaretBrush = System.Windows.Media.Brushes.White, Margin = new Thickness(0, 0, 0, 6) };
+        var selectedVk = currentVk;
         capture.PreviewKeyDown += (_, keyArgs) =>
         {
             var key = keyArgs.Key == Key.System ? keyArgs.SystemKey : keyArgs.Key;
@@ -317,18 +446,15 @@ public partial class MainWindow : Window
         var actionButtons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
         actionButtons.Children.Add(save); actionButtons.Children.Add(cancel);
         var panel = new StackPanel { Margin = new Thickness(18) };
-        panel.Children.Add(new TextBlock { Text = "Recording hotkey", Foreground = System.Windows.Media.Brushes.White, Margin = new Thickness(0, 0, 0, 8) });
-        panel.Children.Add(new TextBlock { Text = "Press a key below, then Save. The hotkey starts and stops recording globally.", Foreground = new SolidColorBrush(Color.FromRgb(146, 154, 173)), FontSize = 11, Margin = new Thickness(0, 0, 0, 4) });
+        panel.Children.Add(new TextBlock { Text = title, Foreground = System.Windows.Media.Brushes.White, Margin = new Thickness(0, 0, 0, 8) });
+        panel.Children.Add(new TextBlock { Text = description, Foreground = new SolidColorBrush(Color.FromRgb(146, 154, 173)), FontSize = 11, Margin = new Thickness(0, 0, 0, 4) });
         panel.Children.Add(capture); panel.Children.Add(actionButtons);
-        var dialog = new Window { Title = "Change recording hotkey", Content = panel, Width = 380, SizeToContent = SizeToContent.Height, ResizeMode = ResizeMode.NoResize, Owner = this, WindowStartupLocation = WindowStartupLocation.CenterOwner, Background = new SolidColorBrush(Color.FromRgb(17, 20, 27)), Foreground = System.Windows.Media.Brushes.White };
+        var dialog = new Window { Title = $"Change {title.ToLowerInvariant()}", Content = panel, Width = 380, SizeToContent = SizeToContent.Height, ResizeMode = ResizeMode.NoResize, Owner = this, WindowStartupLocation = WindowStartupLocation.CenterOwner, Background = new SolidColorBrush(Color.FromRgb(17, 20, 27)), Foreground = System.Windows.Media.Brushes.White };
         WindowAppearance.Apply(dialog);
         save.Click += (_, _) => dialog.DialogResult = true;
         capture.Focus();
-        if (dialog.ShowDialog() != true) return;
-        _recordHotkeyVk = selectedVk;
-        HotkeyButton.Content = $"Hotkey: {KeyName(_recordHotkeyVk)}";
-        SaveSettings();
-        Diagnostic($"Recording hotkey set to {KeyName(_recordHotkeyVk)}.");
+        if (dialog.ShowDialog() != true) return (false, currentVk);
+        return (selectedVk != currentVk, selectedVk);
     }
 
     private void Record_Click(object sender, RoutedEventArgs e)
@@ -351,39 +477,25 @@ public partial class MainWindow : Window
     {
         if (_recording || _selected is null) return;
 
-        _panelMode = PanelModeCheck.IsChecked == true;
-        var foreground = NativeWindowMetrics.GetForegroundWindow();
         var managedAvailable = _managedAccounts.Snapshot().Count > 0;
         _standaloneRecording = !managedAvailable;
-        if (!_panelMode && !managedAvailable && foreground != _windowHandle && !NativeWindowMetrics.TryGetStandaloneRobloxSnapshot(foreground, out _))
-        {
-            StatusText.Text = "No running managed Roblox windows are available. Start an account and try again.";
-            DiagnosticWarning("Record blocked: no usable managed Roblox windows are available.");
-            return;
-        }
 
         _recording = true;
         _recordingWindow = nint.Zero;
+        _recordingAccountId = null;
         _panelTargetWindow = nint.Zero;
         _panelBound = false;
         _capturedInputCount = 0;
         _ignoredInjectedCount = 0;
         _rejectedEventCount = 0;
         _lastRejectedDiagnosticUtc = DateTime.MinValue;
-        if (_panelMode)
-        {
-            _panelTargetWindow = _managedAccounts.Snapshot().FirstOrDefault()?.WindowHandle ?? nint.Zero;
-            var panelMetrics = NativeWindowMetrics.GetClientMetrics(_panelTargetWindow);
-            _recorder.Start([new RecorderWindow("default", _panelTargetWindow, panelMetrics.Width, panelMetrics.Height)]);
-        }
-        else
-        {
-            _recorder.Start([]);
-        }
+        _panelTargetWindow = _managedAccounts.Snapshot().FirstOrDefault()?.WindowHandle ?? nint.Zero;
+        var seedMetrics = NativeWindowMetrics.GetClientMetrics(_panelTargetWindow);
+        _recorder.Start([new RecorderWindow("default", _panelTargetWindow, seedMetrics.Width, seedMetrics.Height)]);
         try
         {
             _inputCapture.StopHotkey = (uint)_recordHotkeyVk;
-            _inputCapture.Start(HandleCapturedInput, _windowHandle, _panelMode);
+            _inputCapture.Start(HandleCapturedInput, _windowHandle, recordPanelKeyboard: true);
             _inputCapture.StopRequested = OnStopHotkey;
         }
         catch (Exception ex)
@@ -397,35 +509,19 @@ public partial class MainWindow : Window
             return;
         }
         RecordButton.Content = "■  Stop recording";
-        PanelModeCheck.IsEnabled = false;
-        HotkeyButton.IsEnabled = false;
+        RecordHotkeyButton.IsEnabled = false;
+        PlayHotkeyButton.IsEnabled = false;
         var hotkeyName = KeyName(_recordHotkeyVk);
-        if (_panelMode)
-        {
-            FooterText.Text = "Panel mode: keystrokes typed with the panel focused are recorded; mouse over the panel is ignored.";
-            StatusText.Text = $"Recording panel input...\nType keys with the panel focused; {hotkeyName} stops.";
-            Diagnostic($"Recording panel input: keystrokes typed with the panel focused will be recorded. Mouse over the panel is ignored; {hotkeyName} stops.");
-        }
-        else
-        {
-            FooterText.Text = $"Recording background input. The panel is minimized; {hotkeyName} stops and restores.";
-            StatusText.Text = foreground == _windowHandle
-                ? "Recording armed. Activate a managed Roblox window; events will appear here."
-                : "Recording managed window input...\nTarget will bind to the active Roblox client.";
-            Diagnostic(foreground == _windowHandle
-                ? "Recording armed while the RAM Macros panel is foreground; panel input will be ignored."
-                : "Recording started with a Roblox client foreground.");
-            _minimizedForRecording = true;
-            WindowState = WindowState.Minimized;
-            Diagnostic($"Recording started; the panel is minimized. Press {hotkeyName} to stop and restore.");
-        }
+        FooterText.Text = $"Recording input anywhere; the mouse is captured over the game, keys everywhere except {hotkeyName}.";
+        StatusText.Text = "Recording input...\nType keys anywhere or click the game; press the record hotkey to stop.";
+        Diagnostic($"Recording started; input is captured in the background. Press {hotkeyName} to stop.");
     }
 
     private void HandleCapturedInput(CapturedInput captured)
     {
         if (!_recording) return;
         var isKeyboard = captured.Event.Kind is MacroEventKind.KeyDown or MacroEventKind.KeyUp;
-        if (captured.WindowHandle == _windowHandle && !(_panelMode && isKeyboard)) return;
+        if (captured.WindowHandle == _windowHandle && !isKeyboard) return;
         var capturedCount = Interlocked.Increment(ref _capturedInputCount);
         if (capturedCount == 1)
         {
@@ -440,9 +536,8 @@ public partial class MainWindow : Window
             if (ignored == 1) Diagnostic("Ignored injected input from the recording hook.");
             return;
         }
-        if (_panelMode)
+        if (isKeyboard && captured.WindowHandle == _windowHandle)
         {
-            if (!isKeyboard || captured.WindowHandle != _windowHandle) return;
             if (!_panelBound)
             {
                 _panelBound = true;
@@ -450,7 +545,7 @@ public partial class MainWindow : Window
                 var bindMetrics = NativeWindowMetrics.GetClientMetrics(_recordingWindow);
                 _recorder.Start([new RecorderWindow("default", _recordingWindow, bindMetrics.Width, bindMetrics.Height)]);
                 if (_panelTargetWindow == nint.Zero)
-                    Diagnostic("Panel mode: recording keystrokes without a window target.");
+                    Diagnostic("Recording keystrokes without a window target.");
             }
             var panelMetrics = NativeWindowMetrics.GetClientMetrics(_recordingWindow);
             var panelWindow = new RecorderWindow("default", _recordingWindow, panelMetrics.Width, panelMetrics.Height);
@@ -458,7 +553,7 @@ public partial class MainWindow : Window
             {
                 QueueEventListRefresh();
                 var count = _recorder.Snapshot().Count;
-                if (count == 1 || count % 25 == 0) Diagnostic($"Captured {count} event(s) for panel-mode keyboard recording.");
+                if (count == 1 || count % 25 == 0) Diagnostic($"Captured {count} event(s) for keyboard recording.");
             }
             else
             {
@@ -466,7 +561,7 @@ public partial class MainWindow : Window
                 if (rejected == 1 || DateTime.UtcNow - _lastRejectedDiagnosticUtc >= TimeSpan.FromSeconds(2))
                 {
                     _lastRejectedDiagnosticUtc = DateTime.UtcNow;
-                    DiagnosticWarning($"Input event not recorded in panel mode: {panelReason}.");
+                    DiagnosticWarning($"Input event not recorded: {panelReason}.");
                 }
             }
             return;
@@ -487,9 +582,10 @@ public partial class MainWindow : Window
         {
             if (!NativeWindowMetrics.TryScreenToClient(targetWindow, captured.ScreenX, captured.ScreenY, out clientX, out clientY)) return;
         }
-        if (_recordingWindow == nint.Zero)
+        if (_recordingWindow != targetWindow)
         {
             _recordingWindow = targetWindow;
+            _recordingAccountId = account.AccountId;
             var metrics = NativeWindowMetrics.GetClientMetrics(_recordingWindow);
             _recorder.Start([new RecorderWindow("default", _recordingWindow, metrics.Width, metrics.Height)]);
             QueueUi(() => StatusText.Text = $"Recording {account.Label} input...\nTarget bound to the managed window.");
@@ -556,24 +652,20 @@ public partial class MainWindow : Window
         var events = _recorder.Stop();
         _recording = false;
         _standaloneRecording = false;
-        if (_minimizedForRecording)
-        {
-            _minimizedForRecording = false;
-            WindowState = WindowState.Normal;
-            Activate();
-        }
         RecordButton.Content = "●  Record";
-        PanelModeCheck.IsEnabled = true;
-        HotkeyButton.IsEnabled = true;
+        RecordHotkeyButton.IsEnabled = true;
+        PlayHotkeyButton.IsEnabled = true;
         FooterText.Text = "Background-safe recording: the panel never steals focus from the game.";
         if (_selected is not null)
         {
             var clientMetrics = NativeWindowMetrics.GetClientMetrics(_recordingWindow);
+            var recordedEvents = MacroSequenceEditor.ExpandGapsToDelays(events);
             var updated = _selected with
             {
-                Events = events,
+                Events = recordedEvents,
                 RecordedClientWidth = clientMetrics.Width > 0 ? clientMetrics.Width : 1,
-                RecordedClientHeight = clientMetrics.Height > 0 ? clientMetrics.Height : 1
+                RecordedClientHeight = clientMetrics.Height > 0 ? clientMetrics.Height : 1,
+                RecordedAccountId = _recordingAccountId
             };
             var index = _macros.IndexOf(_selected);
             if (index >= 0) _macros[index] = updated;
@@ -582,6 +674,7 @@ public partial class MainWindow : Window
             SaveLibrary();
         }
         RefreshEventList();
+        RefreshAccountTargets();
         StatusText.Text = $"Recording stopped.\n{events.Count} event(s) captured.";
         Diagnostic($"Recording stopped with {events.Count} event(s); hook observed {_capturedInputCount}, ignored {_ignoredInjectedCount} injected, rejected {_rejectedEventCount}.");
     }
@@ -757,10 +850,12 @@ public partial class MainWindow : Window
     private void EventList_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (_recording) return;
-        if (FindAncestor<TextBlock>(e.OriginalSource as DependencyObject) is not { Tag: "dragHandle" } handle ||
-            handle.DataContext is not EventRow row) return;
-        EventList.SelectedIndex = row.Index;
-        DragDrop.DoDragDrop(EventList, new DataObject("macro-event-row", row.Index), DragDropEffects.Move);
+        if (FindAncestor<TextBox>(e.OriginalSource as DependencyObject) is not null ||
+            FindAncestor<Button>(e.OriginalSource as DependencyObject) is not null) return;
+        var row = FindAncestor<ListBoxItem>(e.OriginalSource as DependencyObject);
+        if (row?.DataContext is not EventRow eventRow) return;
+        EventList.SelectedIndex = eventRow.Index;
+        DragDrop.DoDragDrop(EventList, new DataObject("macro-event-row", eventRow.Index), DragDropEffects.Move);
     }
 
     private void EventList_DragOver(object sender, DragEventArgs e)
@@ -888,7 +983,109 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private void Play_Click(object sender, RoutedEventArgs e) => StatusText.Text = _selected is null ? "Select a macro first." : "Playback requires managed account targets from the host.";
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool RegisterHotKey(nint window, int id, uint modifiers, uint virtualKey);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool UnregisterHotKey(nint window, int id);
+    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int virtualKey);
+
+    private void Play_Click(object sender, RoutedEventArgs e)
+    {
+        var app = Application.Current as App;
+        if (app?.Playback is null) return;
+        if (_recording) { StatusText.Text = "Stop recording before playing a macro."; return; }
+        if (app.Playback.IsPlaying)
+        {
+            StopHoldTimer();
+            app.Playback.Stop();
+            return;
+        }
+        if (!TryStartPlayback())
+        {
+            StatusText.Text = "Select a macro and at least one playback target first.";
+        }
+    }
+
+    private bool TryStartPlayback()
+    {
+        if (_selected is null) return false;
+        var app = Application.Current as App;
+        if (app?.Playback is null) return false;
+        var targets = _targetAccountIds.Where(id => _managedAccounts.Snapshot().Any(account => account.AccountId == id)).ToArray();
+        if (targets.Length == 0) return false;
+        var mode = PlayModeCombo.SelectedIndex switch
+        {
+            1 => PlaybackMode.Repeat,
+            2 => PlaybackMode.Continuous,
+            3 => PlaybackMode.WhileHeld,
+            _ => PlaybackMode.Once
+        };
+        var repeatCount = 3;
+        if (mode == PlaybackMode.Repeat && !int.TryParse(RepeatCountBox.Text, out repeatCount))
+            repeatCount = 3;
+        _ = PlayAndReportAsync(app.Playback, _selected, targets, mode, Math.Clamp(repeatCount, 1, 999));
+        return true;
+    }
+
+    private async Task PlayAndReportAsync(PlaybackController playback, MacroDefinition macro, IReadOnlyList<string> targets, PlaybackMode mode, int repeatCount)
+    {
+        try
+        {
+            var summary = await playback.PlayAsync(macro, targets, mode, repeatCount, CancellationToken.None);
+            if (summary.Started)
+                Diagnostic($"{macro.Name}: playback {summary.Code.ToLowerInvariant()}{(summary.RunCount > 1 ? $" after {summary.RunCount} run(s)" : string.Empty)} — {summary.Message}");
+            else
+                DiagnosticWarning($"{macro.Name}: playback not started ({summary.Code}) — {summary.Message}");
+        }
+        catch (Exception ex)
+        {
+            DiagnosticError($"{macro.Name}: playback failed — {ex.Message}");
+        }
+    }
+
+    private void Playback_StateChanged(object? sender, EventArgs e)
+    {
+        if (Dispatcher.CheckAccess()) UpdatePlayButtonState();
+        else
+        {
+            try { Dispatcher.BeginInvoke(new Action(UpdatePlayButtonState)); }
+            catch (InvalidOperationException) when (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) { }
+            catch (TaskCanceledException) { }
+        }
+    }
+
+    private void UpdatePlayButtonState()
+    {
+        var isPlaying = (Application.Current as App)?.Playback.IsPlaying == true;
+        PlayButton.Content = isPlaying ? "■  Stop play" : "▶  Play";
+        PlayModeCombo.IsEnabled = !isPlaying;
+        RepeatCountBox.IsEnabled = !isPlaying && PlayModeCombo.SelectedIndex == 1;
+    }
+
+    private sealed record TargetAccount(string AccountId, string Label, bool IsChecked);
+
+    private void RefreshAccountTargets()
+    {
+        var accounts = _managedAccounts.Snapshot();
+        if (!_targetsTouched && _targetAccountIds.Count == 0 && _selected is { RecordedAccountId: not null } selected &&
+            accounts.Any(account => account.AccountId == selected.RecordedAccountId))
+            _targetAccountIds.Add(selected.RecordedAccountId!);
+        if (!_targetsTouched && _targetAccountIds.Count == 0 && accounts.Count > 0)
+            _targetAccountIds.Add(accounts[0].AccountId);
+        var removed = _targetAccountIds.Where(id => accounts.All(account => account.AccountId != id)).ToArray();
+        foreach (var id in removed) _targetAccountIds.Remove(id);
+        var items = accounts.Select(account => new TargetAccount(
+            account.AccountId,
+            $"{account.Label}  (0x{account.WindowHandle.ToInt64():X})",
+            _targetAccountIds.Contains(account.AccountId))).ToArray();
+        AccountList.ItemsSource = items;
+    }
+
+    private void TargetAccount_Changed(object sender, RoutedEventArgs e)
+    {
+        _targetsTouched = true;
+        if (sender is not CheckBox checkBox || checkBox.DataContext is not TargetAccount target) return;
+        if (checkBox.IsChecked == true) _targetAccountIds.Add(target.AccountId);
+        else _targetAccountIds.Remove(target.AccountId);
+    }
     private void Stack_Click(object sender, RoutedEventArgs e) => StatusText.Text = "STACK requested with SWP_NOACTIVATE.";
     private void Grid_Click(object sender, RoutedEventArgs e) => StatusText.Text = "GRID requested with SWP_NOACTIVATE.";
     private void Reset_Click(object sender, RoutedEventArgs e) => StatusText.Text = "RESET requested with SWP_NOACTIVATE.";
@@ -898,6 +1095,11 @@ public partial class MainWindow : Window
         _managedAccounts.Changed -= ManagedAccounts_Changed;
         _inputCapture.StopRequested = null;
         _inputCapture.Dispose();
+        StopHoldTimer();
+        UnregisterHotkeys();
+        if (_hwndSource is not null) _hwndSource.RemoveHook(WndProc);
+        if (Application.Current is App app && app.Playback is not null)
+            app.Playback.StateChanged -= Playback_StateChanged;
         base.OnClosed(e);
     }
 }

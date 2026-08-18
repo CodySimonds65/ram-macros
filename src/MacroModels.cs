@@ -27,6 +27,7 @@ public sealed record MacroDefinition
     public bool MultiWindow { get; init; }
     public int RecordedClientWidth { get; init; }
     public int RecordedClientHeight { get; init; }
+    public string? RecordedAccountId { get; init; }
     public IReadOnlyList<string> WindowRoles { get; init; } = [];
     public IReadOnlyList<MacroEvent> Events { get; init; } = [];
 }

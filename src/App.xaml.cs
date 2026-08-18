@@ -5,18 +5,22 @@ namespace RamMacros;
 public partial class App : Application
 {
     private PluginClient? _client;
+    private InputPostSender? _sender;
     public ManagedAccountRegistry ManagedAccounts { get; } = new();
     public DiagnosticsLog Diagnostics { get; } = new();
+    public PlaybackController Playback { get; private set; } = null!;
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
         var dataDirectory = PluginClient.DataDirectoryFromArgs(e.Args);
-        MainWindow = new MainWindow(ManagedAccounts, Diagnostics, dataDirectory); MainWindow.Show();
         _client = PluginClient.FromArgs(e.Args);
-        if (_client is not null) _ = ConnectHostAsync(_client, Diagnostics);
+        _sender = new InputPostSender(_client);
+        Playback = new PlaybackController(_sender);
+        MainWindow = new MainWindow(ManagedAccounts, Diagnostics, dataDirectory); MainWindow.Show();
+        if (_client is not null) _ = ConnectHostAsync(_client, Diagnostics, _sender, Playback);
         else Diagnostics.Info("Running without a launcher host pipe; standalone Roblox recording is available, while managed playback requires the launcher.");
     }
-    private static async Task ConnectHostAsync(PluginClient client, DiagnosticsLog diagnostics)
+    private static async Task ConnectHostAsync(PluginClient client, DiagnosticsLog diagnostics, InputPostSender sender, PlaybackController playback)
     {
         using var shutdown = new CancellationTokenSource();
         var heartbeat = Task.CompletedTask;
@@ -36,6 +40,11 @@ public partial class App : Application
             while (true)
             {
                 var envelope = await client.ReceiveAsync(shutdown.Token); if (envelope is null) break;
+                if (envelope.Type == "input.result")
+                {
+                    sender.HandleResult(envelope.RequestId, envelope.Payload);
+                    continue;
+                }
                 if (envelope.Type == "action.invoke")
                     await client.SendAsync("action.result", new { accepted = true, code = "queued", message = "Macro invocation accepted by RAM Macros." }, envelope.RequestId, shutdown.Token);
                 else if (envelope.Type == "accounts.result")
@@ -53,6 +62,8 @@ public partial class App : Application
         {
             shutdown.Cancel();
             if (forwardDiagnostic is not null) diagnostics.Added -= forwardDiagnostic;
+            sender.ConnectionClosed();
+            playback.Stop();
             try { await Task.WhenAll(heartbeat, accountRefresh); }
             catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException) { }
             await client.DisposeAsync();

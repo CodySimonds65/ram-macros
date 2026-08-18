@@ -17,4 +17,7 @@
     <Compile Remove="tests\**\*.cs" />
     <None Remove="tests\**\*" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="RamMacros.Tests" />
+  </ItemGroup>
 </Project>

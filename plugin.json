@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.codysimonds65.ram.macros",
   "name": "RAM Macros",
-  "version": "0.1.4",
+  "version": "0.1.6",
   "contractVersion": "1.0",
   "publisher": "CodySimonds65",
   "description": "Portable background-safe macro recording for managed Roblox clients.",

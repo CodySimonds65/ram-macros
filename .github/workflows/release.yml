@@ -47,8 +47,11 @@ jobs:
           if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Release version must be semantic version vMAJOR.MINOR.PATCH; received '$tag'." }
           $plugin = Get-Content -Raw -LiteralPath 'plugin.json' | ConvertFrom-Json
           $manifest = Get-Content -Raw -LiteralPath 'manifest.json' | ConvertFrom-Json
+          [xml]$project = Get-Content -Raw -LiteralPath 'ram-macros.csproj'
+          $projectVersion = [string]$project.Project.PropertyGroup.Version
           if ($plugin.id -ne $env:PLUGIN_ID -or $manifest.id -ne $env:PLUGIN_ID) { throw "Plugin identity does not match '$env:PLUGIN_ID'." }
           if ($plugin.version -ne $manifest.version) { throw "plugin.json and manifest.json versions must match." }
+          if ($projectVersion -ne $plugin.version) { throw "ram-macros.csproj Version '$projectVersion' does not match plugin version '$($plugin.version)'." }
           if ($plugin.version -ne $tag.Substring(1)) { throw "Plugin version '$($plugin.version)' does not match release tag '$tag'." }
 
           $tagCommit = (git rev-list -n 1 $tag 2>$null)

@@ -29,28 +29,27 @@ jobs:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
 
-      - name: Validate version and determine whether to publish
+      - name: Validate version and determine release commit
         id: version
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $plugin = Get-Content -Raw -LiteralPath 'plugin.json' | ConvertFrom-Json
           $manifest = Get-Content -Raw -LiteralPath 'manifest.json' | ConvertFrom-Json
+          [xml]$project = Get-Content -Raw -LiteralPath 'ram-macros.csproj'
+          $projectVersion = [string]$project.Project.PropertyGroup.Version
           if ($plugin.id -ne $env:PLUGIN_ID -or $manifest.id -ne $env:PLUGIN_ID) {
               throw "Plugin identity does not match '$env:PLUGIN_ID'."
           }
           if ($plugin.version -ne $manifest.version) {
               throw "plugin.json version '$($plugin.version)' does not match manifest.json version '$($manifest.version)'."
           }
+          if ($projectVersion -ne $plugin.version) {
+              throw "ram-macros.csproj Version '$projectVersion' does not match plugin version '$($plugin.version)'."
+          }
           if ($plugin.version -notmatch '^\d+\.\d+\.\d+$') {
               throw "Plugin version '$($plugin.version)' is not MAJOR.MINOR.PATCH."
-          }
-
-          $version = [version]$plugin.version
-          $existing = @(git tag --list "v$($plugin.version)")
-          if ($existing.Count -gt 0) {
-              "publish=false" >> $env:GITHUB_OUTPUT
-              "No release needed: v$($plugin.version) already exists." >> $env:GITHUB_STEP_SUMMARY
-              exit 0
           }
 
           $latest = @(git tag --list 'v*' | ForEach-Object {
@@ -58,27 +57,108 @@ jobs:
                   [pscustomobject]@{ Tag = $_; Version = [version]$_.Substring(1) }
               }
           } | Sort-Object Version -Descending | Select-Object -First 1)
-          if ($latest.Count -gt 0 -and $version -le $latest[0].Version) {
-              throw "Plugin version $version must be newer than the latest published tag $($latest[0].Tag)."
+
+          # A retry must reuse the tag already associated with this merge.
+          # Automatic patch releases point at a child commit whose parent is
+          # the merge SHA; explicit releases point directly at the merge SHA.
+          $existingForMerge = @(git tag --list 'v*' | ForEach-Object {
+              if ($_ -match '^v(\d+)\.(\d+)\.(\d+)$') {
+                  $target = (git rev-list -n 1 $_).Trim()
+                  $parentText = (git show -s --format=%P $target).Trim()
+                  $parents = if ([string]::IsNullOrWhiteSpace($parentText)) { @() } else { @($parentText -split '\s+') }
+                  if ($target -eq $env:MERGE_SHA -or ($parents.Count -eq 1 -and $parents[0] -eq $env:MERGE_SHA)) {
+                      [pscustomobject]@{ Tag = $_; Version = [version]$_.Substring(1); Commit = $target }
+                  }
+              }
+          } | Sort-Object Version -Descending | Select-Object -First 1)
+          if ($existingForMerge.Count -gt 0) {
+              $existing = $existingForMerge[0]
+              & gh release view $existing.Tag --repo $env:GITHUB_REPOSITORY *> $null
+              $releaseExists = ($LASTEXITCODE -eq 0)
+              $releaseRunsJson = gh run list --workflow release.yml --repo $env:GITHUB_REPOSITORY --json status,headBranch --limit 100
+              if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect existing release runs safely.' }
+              $activeReleaseRuns = @($releaseRunsJson | ConvertFrom-Json | Where-Object {
+                  $_.headBranch -eq $existing.Tag -and $_.status -in @('queued', 'in_progress', 'waiting', 'requested', 'pending')
+              })
+              $publish = if ($releaseExists -or $activeReleaseRuns.Count -gt 0) { 'false' } else { 'true' }
+              "publish=$publish" >> $env:GITHUB_OUTPUT
+              "create_tag=false" >> $env:GITHUB_OUTPUT
+              "tag=$($existing.Tag)" >> $env:GITHUB_OUTPUT
+              "version=$($existing.Version)" >> $env:GITHUB_OUTPUT
+              "release_commit=$($existing.Commit)" >> $env:GITHUB_OUTPUT
+              if ($releaseExists) {
+                  "Release $($existing.Tag) is already published for merge $env:MERGE_SHA; nothing to do." >> $env:GITHUB_STEP_SUMMARY
+                  exit 0
+              }
+              if ($activeReleaseRuns.Count -gt 0) {
+                  "Release publication for $($existing.Tag) is already queued or running; nothing to do." >> $env:GITHUB_STEP_SUMMARY
+                  exit 0
+              }
+              "Tag $($existing.Tag) already exists for merge $env:MERGE_SHA; retrying the missing release publication." >> $env:GITHUB_STEP_SUMMARY
+              exit 0
           }
 
-          $tag = "v$($plugin.version)"
+          $sourceVersion = [string]$plugin.version
+          $version = [version]$sourceVersion
+          $releaseCommit = $env:MERGE_SHA
+          if ($latest.Count -gt 0 -and $version -le $latest[0].Version) {
+              # Keep source versions flexible: when a PR did not request a
+              # version change (including a queued merge whose source still
+              # has the prior release version), create a release-only child
+              # commit that bumps both manifests from the latest tag. The tag
+              # points at this commit, so package metadata and release version
+              # always agree without rewriting main.
+              $baseVersion = $latest[0].Version
+              $nextVersion = '{0}.{1}.{2}' -f $baseVersion.Major, $baseVersion.Minor, ($baseVersion.Build + 1)
+              foreach ($path in @('plugin.json', 'manifest.json', 'ram-macros.csproj')) {
+                  $text = Get-Content -Raw -LiteralPath $path
+                  $pattern = if ($path -eq 'ram-macros.csproj') {
+                      '(<Version>)' + [regex]::Escape($sourceVersion) + '(</Version>)'
+                  } else {
+                      '(?m)^(\s*"version"\s*:\s*")' + [regex]::Escape($sourceVersion) + '(")'
+                  }
+                  $matches = [regex]::Matches($text, $pattern)
+                  if ($matches.Count -ne 1) { throw "Expected exactly one version field in '$path'." }
+                  $text = [regex]::Replace($text, $pattern, {
+                      param($match)
+                      $match.Groups[1].Value + $nextVersion + $match.Groups[2].Value
+                  }, 1)
+                  Set-Content -LiteralPath $path -Value $text -NoNewline
+              }
+
+              $checkPlugin = Get-Content -Raw -LiteralPath 'plugin.json' | ConvertFrom-Json
+              $checkManifest = Get-Content -Raw -LiteralPath 'manifest.json' | ConvertFrom-Json
+              [xml]$checkProject = Get-Content -Raw -LiteralPath 'ram-macros.csproj'
+              if ($checkPlugin.version -ne $nextVersion -or $checkManifest.version -ne $nextVersion -or [string]$checkProject.Project.PropertyGroup.Version -ne $nextVersion) {
+                  throw "Automatic patch bump did not update all release version fields to $nextVersion."
+              }
+              git config user.name 'github-actions[bot]'
+              git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+              git add plugin.json manifest.json ram-macros.csproj
+              git commit -m "chore: prepare release v$nextVersion"
+              $releaseCommit = (git rev-parse HEAD).Trim()
+              $version = [version]$nextVersion
+              "Automatic patch release: v$nextVersion (release-only child commit)." >> $env:GITHUB_STEP_SUMMARY
+          }
+
+          $tag = "v$version"
           "publish=true" >> $env:GITHUB_OUTPUT
+          "create_tag=true" >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT
-          "version=$($plugin.version)" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "release_commit=$releaseCommit" >> $env:GITHUB_OUTPUT
           "### Release candidate" >> $env:GITHUB_STEP_SUMMARY
           "- $env:PLUGIN_NAME $tag" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Create and push release tag
-        if: steps.version.outputs.publish == 'true'
+        if: steps.version.outputs.create_tag == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_COMMIT: ${{ steps.version.outputs.release_commit }}
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git tag -a $env:RELEASE_TAG $env:MERGE_SHA -m "$env:PLUGIN_NAME $env:RELEASE_TAG"
+          git tag -a $env:RELEASE_TAG $env:RELEASE_COMMIT -m "$env:PLUGIN_NAME $env:RELEASE_TAG"
           git push origin $env:RELEASE_TAG
 
       - name: Start signed package release

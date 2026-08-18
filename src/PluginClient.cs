@@ -29,6 +29,7 @@ public sealed class PluginClient : IAsyncDisposable
             if (args is null) return null;
             if (!TryParseArgs(args, out var values)) return null;
             if (!TryGetValue(values, "pipe", out var pipe) || !TryGetValue(values, "plugin-id", out var id)) return null;
+            if (values.ContainsKey("token") && values.ContainsKey("token-file")) return null;
 
             string? token;
             if (values.TryGetValue("token", out var inlineToken)) token = inlineToken;
@@ -121,6 +122,7 @@ public sealed class PluginClient : IAsyncDisposable
             if (!argument.StartsWith("--", StringComparison.Ordinal)) continue;
             var key = argument[2..];
             if (key.Length == 0) return false;
+            if (result.ContainsKey(key)) return false;
             if (key.Equals("ram-plugin", StringComparison.OrdinalIgnoreCase)) { result[key] = "true"; continue; }
             if (i + 1 >= args.Length || args[i + 1] is null || args[i + 1].StartsWith("--", StringComparison.Ordinal)) return false;
             result[key] = args[++i];

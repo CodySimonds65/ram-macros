@@ -31,12 +31,27 @@ var pluginIdField = typeof(PluginClient).GetField("_pluginId", BindingFlags.Inst
 var tokenField = typeof(PluginClient).GetField("_token", BindingFlags.Instance | BindingFlags.NonPublic);
 Require((string?)pluginIdField?.GetValue(launchClient) == "io.github.codysimonds65.ram.macros", "Plugin launch arguments did not preserve the plugin ID.");
 Require((string?)tokenField?.GetValue(launchClient) == "test-token", "Plugin launch arguments did not preserve the token.");
+var parseMethod = typeof(PluginClient).GetMethod("TryParseArgs", BindingFlags.Static | BindingFlags.NonPublic);
+var parseArguments = new object?[] { new[] { "--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.macros", "--data", "test-data" }, null };
+Require((bool?)parseMethod?.Invoke(null, parseArguments) == true, "Valid launch arguments were not parsed.");
+var parsedArguments = parseArguments[1] as IReadOnlyDictionary<string, string>;
+Require(parsedArguments is not null && parsedArguments["pipe"] == "test-pipe" && parsedArguments["data"] == "test-data", "Parsed pipe or data values were not preserved.");
 await launchClient!.DisposeAsync();
 Require(PluginClient.FromArgs(["--ram-plugin", "--pipe"]) is null, "A missing pipe value was accepted.");
 Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "", "--plugin-id", "io.github.codysimonds65.ram.macros", "--token", "test-token"]) is null, "An empty pipe value was accepted.");
 Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id"]) is null, "A missing plugin ID value was accepted.");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "", "--token", "test-token"]) is null, "An empty plugin ID was accepted.");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.macros", "--token", ""]) is null, "An empty inline token was accepted.");
 Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.macros", "--token-file"]) is null, "A missing token-file value was accepted.");
 Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.macros", "--token-file", Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".missing")]) is null, "A missing token file was not rejected safely.");
+var emptyTokenPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".empty-token");
+await File.WriteAllTextAsync(emptyTokenPath, "");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.macros", "--token-file", emptyTokenPath]) is null, "An empty token file was accepted.");
+var conflictTokenPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".conflict-token");
+await File.WriteAllTextAsync(conflictTokenPath, "file-token");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.macros", "--token", "inline-token", "--token-file", conflictTokenPath]) is null, "Conflicting credential sources were accepted.");
+if (File.Exists(conflictTokenPath)) File.Delete(conflictTokenPath);
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "one", "--pipe", "two", "--plugin-id", "io.github.codysimonds65.ram.macros", "--token", "test-token"]) is null, "Duplicate launch options were accepted.");
 var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".ramacro");
 try
 {

@@ -22,6 +22,11 @@ Require(diagnostics.Snapshot()[1].Message.Length == 2_000, "Diagnostic messages 
 using var snapshotDocument = JsonDocument.Parse("{\"accountId\":\"a\",\"label\":\"A\",\"processId\":1,\"processStartTimeUtcTicks\":1,\"windowHandle\":42,\"clientX\":0,\"clientY\":0,\"clientWidth\":100,\"clientHeight\":100,\"dpi\":96,\"isMinimized\":false,\"lastActivityUtc\":\"2026-01-01T00:00:00Z\",\"isRunning\":true,\"rootWindowHandle\":41}");
 var decodedSnapshot = PluginClient.Deserialize<ManagedAccountSnapshot>(snapshotDocument.RootElement);
 Require(decodedSnapshot?.WindowHandle == (nint)42 && decodedSnapshot.RootWindowHandle == (nint)41, "Managed-account HWND wire deserialization failed.");
+var tokenPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".token");
+await File.WriteAllTextAsync(tokenPath, "test-token");
+var launchClient = PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--token-file", tokenPath, "--plugin-id", "io.github.codysimonds65.ram.macros", "--data", "test-data"]);
+Require(launchClient is not null && !File.Exists(tokenPath), "Plugin launch arguments did not preserve the host pipe and token-file values.");
+await launchClient!.DisposeAsync();
 var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".ramacro");
 try
 {

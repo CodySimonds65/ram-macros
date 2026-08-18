@@ -92,7 +92,20 @@ public sealed class PluginClient : IAsyncDisposable
     private async Task<bool> ReadExactlyAsync(byte[] buffer, CancellationToken cancellationToken)
     { var offset = 0; while (offset < buffer.Length) { var read = await _pipe.ReadAsync(buffer.AsMemory(offset), cancellationToken); if (read == 0) return false; offset += read; } return true; }
     private static Dictionary<string, string> ParseArgs(string[] args)
-    { var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); for (var i = 0; i + 1 < args.Length; i++) if (args[i].StartsWith("--", StringComparison.Ordinal)) result[args[i][2..]] = args[++i]; return result; }
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (!args[i].StartsWith("--", StringComparison.Ordinal)) continue;
+            var key = args[i][2..];
+            if (key.Length == 0) continue;
+            var value = "true";
+            if (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+                value = args[++i];
+            result[key] = value;
+        }
+        return result;
+    }
     public sealed record Envelope(string Type, string RequestId, JsonElement Payload, int ProtocolMajor = 1, int ProtocolMinor = 0);
     private static class Json
     {

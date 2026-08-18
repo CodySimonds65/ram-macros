@@ -45,6 +45,17 @@ public partial class App : Application
                     sender.HandleResult(envelope.RequestId, envelope.Payload);
                     continue;
                 }
+                if (envelope.Type == "host.reject")
+                {
+                    var reason = envelope.Payload.TryGetProperty("reason", out var reasonElement) ? reasonElement.GetString() : null;
+                    var messageType = envelope.Payload.TryGetProperty("messageType", out var messageTypeElement) ? messageTypeElement.GetString() : null;
+                    if (messageType is "input.post" or null)
+                    {
+                        sender.HandleRejected(reason ?? "the host rejected the request");
+                        diagnostics.Error($"Host rejected an input request: {reason ?? "no reason supplied"}");
+                    }
+                    continue;
+                }
                 if (envelope.Type == "action.invoke")
                     await client.SendAsync("action.result", new { accepted = true, code = "queued", message = "Macro invocation accepted by RAM Macros." }, envelope.RequestId, shutdown.Token);
                 else if (envelope.Type == "accounts.result")

@@ -44,7 +44,17 @@ public sealed class InputPostSender : IBackgroundMacroTarget
             try
             {
                 await _client.SendAsync("input.post", new { accountId, events = chunk }, requestId, cancellationToken);
-                var result = await completion.Task.WaitAsync(cancellationToken);
+                var chunkDurationSeconds = chunk.Length > 0 ? chunk[^1].OffsetMicroseconds / 1_000_000.0 : 0;
+                var timeout = TimeSpan.FromSeconds(Math.Max(30, chunkDurationSeconds + 10));
+                MacroDispatchResult result;
+                try
+                {
+                    result = await completion.Task.WaitAsync(timeout, cancellationToken);
+                }
+                catch (TimeoutException)
+                {
+                    return new MacroDispatchResult(false, "timeout", "The launcher host did not reply to the input in time.", totalPosted);
+                }
                 totalPosted += result.PostedCount;
                 if (!result.Accepted) return result with { PostedCount = totalPosted };
             }
@@ -70,13 +80,22 @@ public sealed class InputPostSender : IBackgroundMacroTarget
 
     public void ConnectionClosed()
     {
+        FailAllPending(new MacroDispatchResult(false, "disconnected", "The launcher plugin host connection was lost.", 0));
+    }
+
+    public void HandleRejected(string detail)
+    {
+        FailAllPending(new MacroDispatchResult(false, "rejected", $"The launcher host rejected the input request: {detail}", 0));
+    }
+
+    private void FailAllPending(MacroDispatchResult failure)
+    {
         List<TaskCompletionSource<MacroDispatchResult>> completions;
         lock (_gate)
         {
             completions = _pending.Values.ToList();
             _pending.Clear();
         }
-        var failure = new MacroDispatchResult(false, "disconnected", "The launcher plugin host connection was lost.", 0);
         foreach (var completion in completions) completion.TrySetResult(failure);
     }
 

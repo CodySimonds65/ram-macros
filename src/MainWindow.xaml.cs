@@ -36,12 +36,9 @@ public partial class MainWindow : Window
     private int _playHotkeyVk = 0x77;
     private readonly HashSet<string> _targetAccountIds = new(StringComparer.Ordinal);
     private bool _targetsTouched;
-    private HwndSource? _hwndSource;
-    private DispatcherTimer? _holdTimer;
-    private const int WmHotkey = 0x0312;
-    private const int RecordHotkeyId = 0x5243;
-    private const int PlayHotkeyId = 0x504C;
-    private const uint ModNoRepeat = 0x4000;
+    private readonly GlobalInputCapture _hotkeyWatcher = new();
+    private bool _playHeld;
+    private long _lastPlayHotkeyUtc;
     private readonly string _storageDirectory;
     private readonly string _libraryPath;
 
@@ -69,9 +66,7 @@ public partial class MainWindow : Window
         SourceInitialized += (_, _) =>
         {
             _windowHandle = new WindowInteropHelper(this).Handle;
-            _hwndSource = HwndSource.FromHwnd(_windowHandle);
-            _hwndSource?.AddHook(WndProc);
-            RegisterHotkeys();
+            _hotkeyWatcher.Start(HandleHotkey, nint.Zero);
         };
         LoadSettings();
         LoadLibrary();
@@ -145,73 +140,37 @@ public partial class MainWindow : Window
         }
     }
 
-    private void RegisterHotkeys()
+    private void HandleHotkey(CapturedInput captured)
     {
-        if (_hwndSource is null) return;
-        UnregisterHotkeys();
-        if (!RegisterHotKey(_windowHandle, RecordHotkeyId, ModNoRepeat, (uint)_recordHotkeyVk))
-            DiagnosticWarning($"Could not register the record hotkey {KeyName(_recordHotkeyVk)}; another application may be using it.");
-        if (!RegisterHotKey(_windowHandle, PlayHotkeyId, ModNoRepeat, (uint)_playHotkeyVk))
-            DiagnosticWarning($"Could not register the play hotkey {KeyName(_playHotkeyVk)}; another application may be using it.");
-    }
-
-    private void UnregisterHotkeys()
-    {
-        if (_windowHandle == nint.Zero) return;
-        UnregisterHotKey(_windowHandle, RecordHotkeyId);
-        UnregisterHotKey(_windowHandle, PlayHotkeyId);
-    }
-
-    private nint WndProc(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
-    {
-        if (message == WmHotkey)
+        if (captured.Injected) return;
+        var vk = captured.Event.VirtualKey;
+        if (captured.Event.Kind == MacroEventKind.KeyUp)
         {
-            handled = true;
-            var hotkeyId = wParam.ToInt32();
-            if (hotkeyId == RecordHotkeyId)
+            if (vk == _playHotkeyVk && _playHeld)
             {
-                if (!_recording) StartRecording();
+                _playHeld = false;
+                (Application.Current as App)?.Playback.Stop();
             }
-            else if (hotkeyId == PlayHotkeyId)
-            {
-                TogglePlaybackFromHotkey();
-            }
+            return;
         }
-        return nint.Zero;
-    }
-
-    private void TogglePlaybackFromHotkey()
-    {
+        if (vk == _recordHotkeyVk)
+        {
+            if (!_recording) StartRecording();
+            return;
+        }
+        if (vk != _playHotkeyVk || _recording) return;
+        var now = Environment.TickCount64;
+        if (now - _lastPlayHotkeyUtc < 250) return;
+        _lastPlayHotkeyUtc = now;
         var app = Application.Current as App;
-        if (app?.Playback is null || _recording) return;
+        if (app?.Playback is null) return;
         if (app.Playback.IsPlaying)
         {
-            StopHoldTimer();
+            _playHeld = false;
             app.Playback.Stop();
             return;
         }
-        if (TryStartPlayback() && PlayModeCombo.SelectedIndex == 3)
-            StartHoldTimer();
-    }
-
-    private void StartHoldTimer()
-    {
-        StopHoldTimer();
-        var heldVk = _playHotkeyVk;
-        _holdTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
-        _holdTimer.Tick += (_, _) =>
-        {
-            if (GetAsyncKeyState(heldVk) < 0) return;
-            StopHoldTimer();
-            (Application.Current as App)?.Playback.Stop();
-        };
-        _holdTimer.Start();
-    }
-
-    private void StopHoldTimer()
-    {
-        _holdTimer?.Stop();
-        _holdTimer = null;
+        if (TryStartPlayback()) _playHeld = PlayModeCombo.SelectedIndex == 3;
     }
 
     private void NewMacro_Click(object sender, RoutedEventArgs e)
@@ -410,7 +369,6 @@ public partial class MainWindow : Window
         _recordHotkeyVk = vk;
         RecordHotkeyButton.Content = $"Record hotkey: {KeyName(_recordHotkeyVk)}";
         SaveSettings();
-        RegisterHotkeys();
         Diagnostic($"Recording hotkey set to {KeyName(_recordHotkeyVk)}.");
     }
 
@@ -427,7 +385,6 @@ public partial class MainWindow : Window
         _playHotkeyVk = vk;
         PlayHotkeyButton.Content = $"Play hotkey: {KeyName(_playHotkeyVk)}";
         SaveSettings();
-        RegisterHotkeys();
         Diagnostic($"Playback hotkey set to {KeyName(_playHotkeyVk)}.");
     }
 
@@ -988,10 +945,6 @@ public partial class MainWindow : Window
         return null;
     }
 
-    [DllImport("user32.dll", SetLastError = true)] private static extern bool RegisterHotKey(nint window, int id, uint modifiers, uint virtualKey);
-    [DllImport("user32.dll", SetLastError = true)] private static extern bool UnregisterHotKey(nint window, int id);
-    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int virtualKey);
-
     private void Play_Click(object sender, RoutedEventArgs e)
     {
         var app = Application.Current as App;
@@ -999,7 +952,7 @@ public partial class MainWindow : Window
         if (_recording) { StatusText.Text = "Stop recording before playing a macro."; return; }
         if (app.Playback.IsPlaying)
         {
-            StopHoldTimer();
+            _playHeld = false;
             app.Playback.Stop();
             return;
         }
@@ -1026,6 +979,14 @@ public partial class MainWindow : Window
         var repeatCount = 3;
         if (mode == PlaybackMode.Repeat && !int.TryParse(RepeatCountBox.Text, out repeatCount))
             repeatCount = 3;
+        var modeLabel = mode switch
+        {
+            PlaybackMode.Repeat => "X-times",
+            PlaybackMode.Continuous => "continuous",
+            PlaybackMode.WhileHeld => "while-held",
+            _ => "once"
+        };
+        Diagnostic($"Playing '{_selected.Name}' to {targets.Length} account(s) in {modeLabel} mode.");
         _ = PlayAndReportAsync(app.Playback, _selected, targets, mode, Math.Clamp(repeatCount, 1, 999));
         return true;
     }
@@ -1100,9 +1061,7 @@ public partial class MainWindow : Window
         _managedAccounts.Changed -= ManagedAccounts_Changed;
         _inputCapture.StopRequested = null;
         _inputCapture.Dispose();
-        StopHoldTimer();
-        UnregisterHotkeys();
-        if (_hwndSource is not null) _hwndSource.RemoveHook(WndProc);
+        _hotkeyWatcher.Dispose();
         if (Application.Current is App app && app.Playback is not null)
             app.Playback.StateChanged -= Playback_StateChanged;
         base.OnClosed(e);
@@ -1190,3 +1149,4 @@ internal static class WindowAppearance
 {
     public static void Apply(Window window) { window.SourceInitialized += (_, _) => { }; }
 }
+

@@ -131,4 +131,22 @@ jobs:
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
           RELEASE_TARGET: ${{ needs.build.outputs.commit }}
         run: |
-          gh release create $env:RELEASE_TAG '.\release\plugin.json#plugin.json' '.\release\plugin.zip#plugin.zip' '.\release\plugin.sha256#plugin.sha256' '.\release\plugin.sig#plugin.sig' --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_TARGET --title "$env:PLUGIN_NAME $env:RELEASE_TAG" --generate-notes --fail-on-no-commits
+          & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+              "Release $env:RELEASE_TAG already exists; treating this retry as successful." >> $env:GITHUB_STEP_SUMMARY
+              exit 0
+          }
+
+          $createOutput = & gh release create $env:RELEASE_TAG '.\release\plugin.json#plugin.json' '.\release\plugin.zip#plugin.zip' '.\release\plugin.sha256#plugin.sha256' '.\release\plugin.sig#plugin.sig' --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_TARGET --title "$env:PLUGIN_NAME $env:RELEASE_TAG" --generate-notes --fail-on-no-commits 2>&1
+          $createExitCode = $LASTEXITCODE
+          $createOutput | ForEach-Object { Write-Output $_ }
+          if ($createExitCode -eq 0) { exit 0 }
+
+          # A concurrent retry may have won the create race. Re-check before
+          # failing so the release remains idempotent.
+          & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+              "Release $env:RELEASE_TAG was created by a concurrent retry; treating this run as successful." >> $env:GITHUB_STEP_SUMMARY
+              exit 0
+          }
+          throw "GitHub release creation failed with exit code $createExitCode."

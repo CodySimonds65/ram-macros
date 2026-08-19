@@ -19,6 +19,16 @@ public interface IBackgroundMacroIntentTarget
         CancellationToken cancellationToken);
 }
 
+public sealed record ForegroundSessionResult(bool Accepted, string Code, string Message, string? SessionId = null);
+
+public interface IForegroundMacroTarget
+{
+    Task<ForegroundSessionResult> OpenForegroundSessionAsync(IReadOnlyList<string> accountIds, CancellationToken cancellationToken);
+    Task<ForegroundSessionResult> ActivateForegroundAccountAsync(string sessionId, string accountId, CancellationToken cancellationToken);
+    Task<MacroDispatchResult> DispatchForegroundAsync(string sessionId, string accountId, IReadOnlyList<MacroEvent> events, CancellationToken cancellationToken);
+    Task<ForegroundSessionResult> CloseForegroundSessionAsync(string sessionId, bool restoreForeground, CancellationToken cancellationToken);
+}
+
 public sealed record MacroDispatchResult(bool Accepted, string Code, string Message, int PostedCount)
 {
     /// <summary>
@@ -54,6 +64,49 @@ public sealed class SequenceRunner(IBackgroundMacroTarget target)
             results.Add(await DispatchOneAsync(accountId, events, PlaybackIntent.BackgroundMessage, cancellationToken));
         }
         return results;
+    }
+
+    public async Task<IReadOnlyList<MacroDispatchResult>> RunForegroundAsync(
+        MacroDefinition macro,
+        IReadOnlyList<string> accountIds,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(macro);
+        ArgumentNullException.ThrowIfNull(accountIds);
+        ValidateAccountIds(accountIds);
+        if (_target is not IForegroundMacroTarget foreground)
+            return await RunSequentialAsync(macro, accountIds, cancellationToken).ConfigureAwait(false);
+
+        var results = new List<MacroDispatchResult>(accountIds.Count);
+        var opened = await foreground.OpenForegroundSessionAsync(accountIds, cancellationToken).ConfigureAwait(false);
+        if (!opened.Accepted || string.IsNullOrWhiteSpace(opened.SessionId))
+        {
+            return accountIds.Select(accountId => new MacroDispatchResult(false, opened.Code, opened.Message, 0) { AccountId = accountId }).ToArray();
+        }
+
+        try
+        {
+            var events = OrderedEvents(macro);
+            foreach (var accountId in accountIds)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var activated = await foreground.ActivateForegroundAccountAsync(opened.SessionId, accountId, cancellationToken).ConfigureAwait(false);
+                if (!activated.Accepted)
+                {
+                    results.Add(new MacroDispatchResult(false, activated.Code, activated.Message, 0) { AccountId = accountId });
+                    if (activated.Code is "user-takeover" or "focus-denied" or "cancelled") break;
+                    continue;
+                }
+                var dispatched = await DispatchOneForegroundAsync(foreground, opened.SessionId, accountId, events, cancellationToken).ConfigureAwait(false);
+                results.Add(dispatched);
+                if (!dispatched.Accepted && dispatched.Code is ("user-takeover" or "focus-lost" or "focus-denied" or "cancelled")) break;
+            }
+            return results;
+        }
+        finally
+        {
+            await foreground.CloseForegroundSessionAsync(opened.SessionId, restoreForeground: true, CancellationToken.None).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -156,6 +209,21 @@ public sealed class SequenceRunner(IBackgroundMacroTarget target)
             result = new MacroDispatchResult(false, "dispatch-error", ex.Message, 0);
         }
         return result with { AccountId = accountId };
+    }
+
+    private static async Task<MacroDispatchResult> DispatchOneForegroundAsync(
+        IForegroundMacroTarget target,
+        string sessionId,
+        string accountId,
+        IReadOnlyList<MacroEvent> events,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return (await target.DispatchForegroundAsync(sessionId, accountId, events, cancellationToken).ConfigureAwait(false)) with { AccountId = accountId };
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { return new MacroDispatchResult(false, "dispatch-error", ex.Message, 0) { AccountId = accountId }; }
     }
 
     private static async Task<IReadOnlyList<MacroDispatchResult>> AwaitInCallerOrderAsync(

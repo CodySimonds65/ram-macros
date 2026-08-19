@@ -1,6 +1,8 @@
 # RAM Macros
 
-RAM Macros is a standalone Apache-2.0 RoRoRo/Roblox Account Manager plugin for portable, window-relative macro recording and playback. It exchanges length-prefixed JSON with the launcher host and never uses foreground-input APIs. Background delivery is attempted through the host broker; a rejected or stale target is reported and skipped.
+RAM Macros is a standalone Apache-2.0 Roblox Account Manager plugin for portable, window-relative macro recording and playback. It exchanges length-prefixed JSON with the launcher host and requests one guarded foreground automation session for each batch. Selected accounts run in order through the single desktop-wide input stream; focus may switch briefly and mouse events may move the cursor, then the prior client is restored when safe. User takeover cancels without fighting for focus.
+
+Legacy background-message requests remain wire-compatible but fail closed with `foreground-required`; a posted message is never reported as gameplay consumption.
 
 The `.ramacro` bundle is RAM’s own versioned ZIP format. Bundles contain metadata and optional preview assets only—never executables—and unknown optional fields survive a round trip. Standard playback follows account-selection order; multi-window playback requires explicit role mappings.
 

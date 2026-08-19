@@ -59,8 +59,8 @@ public partial class App : Application
             _ = ((App)Current).SendHotkeySubscriptionAsync();
             forwardDiagnostic = (_, entry) => _ = SendDiagnosticAsync(client, entry, shutdown.Token);
             diagnostics.Added += forwardDiagnostic;
-            await client.SendAsync("action.register", new { actionId = "io.github.codysimonds65.ram.macros.run", displayName = "Run RAM macro", description = "Run a named macro on selected managed accounts without focus changes.", argumentSchemaJson = "{\"type\":\"object\",\"properties\":{\"macroId\":{\"type\":\"string\"}}}", requiredCapabilities = new[] { "host.input.background" } });
-            diagnostics.Info("Registered RAM Macros action bridge.");
+            await client.SendAsync("action.register", new { actionId = "io.github.codysimonds65.ram.macros.run", displayName = "Run RAM macro", description = "Run a named macro on selected managed accounts with guarded foreground automation.", argumentSchemaJson = "{\"type\":\"object\",\"properties\":{\"macroId\":{\"type\":\"string\"}}}", requiredCapabilities = new[] { "host.input.foreground.real" } });
+            diagnostics.Info("Registered RAM Macros action bridge (foreground automation; focus may switch briefly).");
             heartbeat = SendHeartbeatsAsync(client, shutdown.Token);
             accountRefresh = RefreshAccountsAsync(client, shutdown.Token);
             while (true)

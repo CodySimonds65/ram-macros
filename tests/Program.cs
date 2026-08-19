@@ -158,6 +158,24 @@ for (var i = 0; i < 4500; i++) chunkSource.Add(E(i * 1000L));
 var wireChunks = InputPostSender.ChunkForWire(chunkSource, 2000);
 Require(wireChunks.Count == 3 && wireChunks[0].Length == 2000 && wireChunks[1].Length == 2000 && wireChunks[2].Length == 500, "Chunking did not split into the expected sizes.");
 Require(wireChunks[0][0].OffsetMicroseconds == 0 && wireChunks[1][0].OffsetMicroseconds == 2_000_000, "Chunk offsets were not preserved as absolute before normalization.");
+var sentRequests = new List<(string Id, object Payload)>();
+var sender = InputPostSender.ForTesting((type, payload, requestId, _) =>
+{
+    lock (sentRequests) sentRequests.Add((requestId, payload));
+    return Task.CompletedTask;
+});
+var senderA = sender.DispatchAsync("account-a", [E(0)], PlaybackIntent.BackgroundMessageProbe, CancellationToken.None);
+var senderB = sender.DispatchAsync("account-b", [E(0)], PlaybackIntent.BackgroundMessageProbe, CancellationToken.None);
+for (var wait = 0; wait < 20 && sentRequests.Count < 2; wait++) await Task.Delay(10);
+List<(string Id, object Payload)> requestSnapshot;
+lock (sentRequests) requestSnapshot = sentRequests.ToList();
+Require(requestSnapshot.Count == 2 && requestSnapshot.All(item => JsonSerializer.SerializeToElement(item.Payload).TryGetProperty("deliveryIntent", out var intent) && intent.GetString() == "background-message-probe"),
+    "Concurrent input requests did not preserve the explicit message-only probe intent.");
+foreach (var request in requestSnapshot.AsEnumerable().Reverse())
+    sender.HandleResult(request.Id, JsonSerializer.SerializeToElement(new { accepted = true, code = "ok", message = "posted", postedCount = 1, deliveryMode = "post-message-probe", verification = "unverified", traceId = request.Id, targetRenderWindow = 42L }));
+var senderResults = await Task.WhenAll(senderA, senderB);
+Require(senderResults.All(result => result.Accepted && result.DeliveryMode == "post-message-probe" && result.Verification == "unverified"),
+    "Out-of-order input result correlation did not preserve probe metadata.");
 var expandedGaps = MacroSequenceEditor.ExpandGapsToDelays(editorEvents);
 Require(expandedGaps.Count == 5 && expandedGaps[1].Kind == MacroEventKind.Delay && expandedGaps[3].Kind == MacroEventKind.Delay, "Recorded gaps were not expanded into delay rows.");
 Require(expandedGaps[0].OffsetMicroseconds == 0 && expandedGaps[1].OffsetMicroseconds == 250_000 && expandedGaps[2].OffsetMicroseconds == 250_000 && expandedGaps[3].OffsetMicroseconds == 1_000_000 && expandedGaps[4].OffsetMicroseconds == 1_000_000, "Expanded delay rows did not preserve the timeline.");
@@ -184,6 +202,41 @@ var busyResult = await playback.PlayAsync(playbackMacro, ["account-a"], Playback
 Require(!busyResult.Started && busyResult.Code == "busy", "The busy guard did not reject concurrent playback.");
 playback.Stop();
 await continuousGuard;
+var concurrentTarget = new ConcurrentMacroTarget(2);
+var concurrentRunner = new SequenceRunner(concurrentTarget);
+var concurrentTask = concurrentRunner.RunConcurrentAsync(playbackMacro, ["account-a", "account-b"], CancellationToken.None);
+await concurrentTarget.BothEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+Require(concurrentTarget.EnteredCount == 2, "Concurrent playback did not start both account dispatches before either completed.");
+concurrentTarget.Release.TrySetResult(true);
+var concurrentResults = await concurrentTask;
+Require(concurrentResults.Count == 2 && concurrentResults[0].AccountId == "account-a" && concurrentResults[1].AccountId == "account-b",
+    "Concurrent playback did not preserve deterministic account result ordering.");
+var cancellationTarget = new ConcurrentMacroTarget(2);
+using var concurrentCancellation = new CancellationTokenSource();
+var cancellationRun = concurrentRunner = new SequenceRunner(cancellationTarget);
+var cancellationTask = cancellationRun.RunConcurrentAsync(playbackMacro, ["account-a", "account-b"], concurrentCancellation.Token);
+await cancellationTarget.BothEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+concurrentCancellation.Cancel();
+var cancellationObserved = false;
+try { await cancellationTask; }
+catch (OperationCanceledException) { cancellationObserved = true; }
+Require(cancellationObserved, "Concurrent playback did not propagate cancellation to all account dispatches.");
+var isolatedResults = await new SequenceRunner(new FailureIsolatingTarget()).RunConcurrentAsync(playbackMacro, ["account-a", "account-b"], CancellationToken.None);
+Require(isolatedResults.Count == 2 && !isolatedResults[0].Accepted && isolatedResults[1].Accepted,
+    "A failed account dispatch incorrectly canceled or hid its sibling result.");
+var duplicateRejected = false;
+try { await concurrentRunner.RunConcurrentAsync(playbackMacro, ["account-a", "account-a"], CancellationToken.None); }
+catch (ArgumentException) { duplicateRejected = true; }
+Require(duplicateRejected, "Concurrent playback accepted duplicate account targets.");
+var multiWindowDuplicateRejected = false;
+try
+{
+    await concurrentRunner.RunMultiWindowAsync(
+        new MacroDefinition { MultiWindow = true, WindowRoles = ["left", "right"], Events = [new MacroEvent { WindowRole = "left" }, new MacroEvent { WindowRole = "right" }] },
+        new Dictionary<string, string> { ["left"] = "account-a", ["right"] = "account-a" }, CancellationToken.None);
+}
+catch (ArgumentException) { multiWindowDuplicateRejected = true; }
+Require(multiWindowDuplicateRejected, "Multi-window playback accepted duplicate account mappings.");
 Console.WriteLine("Macro playback smoke tests passed.");
 
 file sealed class FakeMacroTarget(Action onDispatch) : IBackgroundMacroTarget
@@ -194,4 +247,27 @@ file sealed class FakeMacroTarget(Action onDispatch) : IBackgroundMacroTarget
         await Task.Yield();
         return new MacroDispatchResult(true, "ok", "ok", events.Count);
     }
+}
+
+file sealed class ConcurrentMacroTarget(int expectedEntries) : IBackgroundMacroTarget
+{
+    private int _entered;
+    public int EnteredCount => Volatile.Read(ref _entered);
+    public TaskCompletionSource<bool> BothEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource<bool> Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public async Task<MacroDispatchResult> DispatchAsync(string accountId, IReadOnlyList<MacroEvent> events, CancellationToken cancellationToken)
+    {
+        if (Interlocked.Increment(ref _entered) == expectedEntries) BothEntered.TrySetResult(true);
+        await Release.Task.WaitAsync(cancellationToken);
+        return new MacroDispatchResult(true, "ok", "ok", events.Count);
+    }
+}
+
+file sealed class FailureIsolatingTarget : IBackgroundMacroTarget
+{
+    public Task<MacroDispatchResult> DispatchAsync(string accountId, IReadOnlyList<MacroEvent> events, CancellationToken cancellationToken) =>
+        Task.FromResult(accountId == "account-a"
+            ? new MacroDispatchResult(false, "stale-window", "stale", 0)
+            : new MacroDispatchResult(true, "ok", "ok", events.Count));
 }

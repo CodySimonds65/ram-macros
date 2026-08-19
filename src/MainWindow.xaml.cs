@@ -38,6 +38,7 @@ public partial class MainWindow : Window
     private bool _targetsTouched;
     private bool _playHeld;
     private long _lastPlayHotkeyUtc;
+    private Button? _probeButton;
     private readonly string _storageDirectory;
     private readonly string _libraryPath;
 
@@ -46,6 +47,23 @@ public partial class MainWindow : Window
     public MainWindow(ManagedAccountRegistry? managedAccounts = null, DiagnosticsLog? diagnostics = null, string? dataDirectory = null)
     {
         InitializeComponent();
+        // Keep the probe opt-in and visually close to Play without changing the
+        // compact XAML layout. It is diagnostic-only: the host forces
+        // PostMessage and reports posted/unverified metadata.
+        if (PlayButton.Parent is Panel playbackPanel)
+        {
+            _probeButton = new Button
+            {
+                Content = "Probe messages",
+                Margin = new Thickness(8, 0, 0, 0),
+                Padding = new Thickness(10, 7, 10, 7),
+                Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x1D, 0x22, 0x30)),
+                Foreground = System.Windows.Media.Brushes.White,
+                ToolTip = "Diagnostic only: force PostMessage and report posted/unverified."
+            };
+            _probeButton.Click += Probe_Click;
+            playbackPanel.Children.Insert(Math.Min(1, playbackPanel.Children.Count), _probeButton);
+        }
         _managedAccounts = managedAccounts ?? new ManagedAccountRegistry();
         _diagnostics = diagnostics ?? new DiagnosticsLog();
         _storageDirectory = string.IsNullOrWhiteSpace(dataDirectory) ? AppContext.BaseDirectory : dataDirectory;
@@ -73,6 +91,7 @@ public partial class MainWindow : Window
         if (app is not null)
         {
             app.Playback.StateChanged += Playback_StateChanged;
+            app.Playback.RunCompleted += Playback_RunCompleted;
             app.HotkeyPressed += App_HotkeyPressed;
             app.HotkeyReleased += App_HotkeyReleased;
             app.UpdateHotkeySubscription(_recordHotkeyVk, _playHotkeyVk);
@@ -954,10 +973,9 @@ public partial class MainWindow : Window
 
     private bool TryStartPlayback()
     {
-        if (_selected is null) return false;
         var app = Application.Current as App;
-        if (app?.Playback is null) return false;
-        var targets = _targetAccountIds.Where(id => _managedAccounts.Snapshot().Any(account => account.AccountId == id)).ToArray();
+        if (_selected is null || app?.Playback is null) return false;
+        var targets = GetLiveTargets();
         if (targets.Length == 0) return false;
         var mode = PlayModeCombo.SelectedIndex switch
         {
@@ -979,6 +997,35 @@ public partial class MainWindow : Window
         Diagnostic($"Playing '{_selected.Name}' to {targets.Length} account(s) in {modeLabel} mode.");
         _ = PlayAndReportAsync(app.Playback, _selected, targets, mode, Math.Clamp(repeatCount, 1, 999));
         return true;
+    }
+
+    private string[] GetLiveTargets() =>
+        _targetAccountIds.Where(id => _managedAccounts.Snapshot().Any(account => account.AccountId == id)).ToArray();
+
+    private void Probe_Click(object sender, RoutedEventArgs e)
+    {
+        var app = Application.Current as App;
+        if (_recording) { StatusText.Text = "Stop recording before probing a macro."; return; }
+        if (app?.Playback is null || _selected is null) { StatusText.Text = "Select a macro before probing."; return; }
+        var targets = GetLiveTargets();
+        if (targets.Length == 0) { StatusText.Text = "Select at least one playback target before probing."; return; }
+        Diagnostic($"Probing '{_selected.Name}' to {targets.Length} account(s): PostMessage only, posted/unverified.");
+        _ = ProbeAndReportAsync(app.Playback, _selected, targets);
+    }
+
+    private async Task ProbeAndReportAsync(PlaybackController playback, MacroDefinition macro, IReadOnlyList<string> targets)
+    {
+        try
+        {
+            var summary = await playback.PlayProbeAsync(macro, targets, CancellationToken.None);
+            Diagnostic($"{macro.Name}: probe {summary.Code.ToLowerInvariant()} — {summary.Message} (posted/unverified; no consumption claim)");
+            foreach (var result in summary.Results)
+                Diagnostic($"Probe {result.AccountId ?? "?"}: {result.Code}, accepted={result.Accepted}, posted={result.PostedCount}, mode={result.DeliveryMode ?? "unknown"}, verification={result.Verification ?? "unknown"}");
+        }
+        catch (Exception ex)
+        {
+            DiagnosticError($"{macro.Name}: probe failed — {ex.Message}");
+        }
     }
 
     private async Task PlayAndReportAsync(PlaybackController playback, MacroDefinition macro, IReadOnlyList<string> targets, PlaybackMode mode, int repeatCount)
@@ -1008,10 +1055,20 @@ public partial class MainWindow : Window
         }
     }
 
+    private void Playback_RunCompleted(object? sender, PlaybackRunCompletedEventArgs e)
+    {
+        QueueUi(() =>
+        {
+            foreach (var result in e.Report.Results)
+                Diagnostic($"Run {e.Report.RunNumber} {result.AccountId ?? "?"}: {result.Code}, accepted={result.Accepted}, posted={result.PostedCount}, mode={result.DeliveryMode ?? "unknown"}, verification={result.Verification ?? "unknown"}");
+        });
+    }
+
     private void UpdatePlayButtonState()
     {
         var isPlaying = (Application.Current as App)?.Playback.IsPlaying == true;
         PlayButton.Content = isPlaying ? "■  Stop play" : "▶  Play";
+        if (_probeButton is not null) _probeButton.IsEnabled = !isPlaying;
         PlayModeCombo.IsEnabled = !isPlaying;
         RepeatCountBox.IsEnabled = !isPlaying && PlayModeCombo.SelectedIndex == 1;
     }
@@ -1053,6 +1110,7 @@ public partial class MainWindow : Window
         if (Application.Current is App app)
         {
             app.Playback.StateChanged -= Playback_StateChanged;
+            app.Playback.RunCompleted -= Playback_RunCompleted;
             app.HotkeyPressed -= App_HotkeyPressed;
             app.HotkeyReleased -= App_HotkeyReleased;
         }

@@ -13,21 +13,42 @@ internal sealed record WireInput(
     double NormalizedY,
     long OffsetMicroseconds);
 
-public sealed class InputPostSender : IBackgroundMacroTarget
+public sealed class InputPostSender : IBackgroundMacroTarget, IBackgroundMacroIntentTarget
 {
-    private readonly PluginClient? _client;
+    private readonly Func<string, object, string, CancellationToken, Task>? _sendAsync;
     private readonly object _gate = new();
     private readonly Dictionary<string, TaskCompletionSource<MacroDispatchResult>> _pending = new(StringComparer.Ordinal);
     private const int ChunkSize = 2000;
 
-    public InputPostSender(PluginClient? client) => _client = client;
+    public InputPostSender(PluginClient? client)
+    {
+        _sendAsync = client is null ? null : client.SendAsync;
+    }
+
+    // Test/integration seam: keeping transport injection here lets concurrent
+    // request-correlation tests exercise the real pending-request lifecycle
+    // without opening a named pipe.
+    private InputPostSender(Func<string, object, string, CancellationToken, Task> sendAsync) => _sendAsync = sendAsync;
+
+    internal static InputPostSender ForTesting(Func<string, object, string, CancellationToken, Task> sendAsync) =>
+        new(sendAsync ?? throw new ArgumentNullException(nameof(sendAsync)));
 
     public async Task<MacroDispatchResult> DispatchAsync(string accountId, IReadOnlyList<MacroEvent> events, CancellationToken cancellationToken)
     {
-        if (_client is null) return new MacroDispatchResult(false, "no-host", "The launcher plugin host is not connected.", 0);
+        return await DispatchAsync(accountId, events, PlaybackIntent.BackgroundMessage, cancellationToken);
+    }
+
+    public async Task<MacroDispatchResult> DispatchAsync(
+        string accountId,
+        IReadOnlyList<MacroEvent> events,
+        PlaybackIntent intent,
+        CancellationToken cancellationToken)
+    {
+        if (_sendAsync is null) return new MacroDispatchResult(false, "no-host", "The launcher plugin host is not connected.", 0) { AccountId = accountId };
         var chunks = ChunkForWire(events, ChunkSize);
-        if (chunks.Count == 0) return new MacroDispatchResult(false, "invalid-request", "The macro has no playable events.", 0);
+        if (chunks.Count == 0) return new MacroDispatchResult(false, "invalid-request", "The macro has no playable events.", 0) { AccountId = accountId };
         var totalPosted = 0;
+        MacroDispatchResult? lastResult = null;
         for (var index = 0; index < chunks.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -38,12 +59,20 @@ public sealed class InputPostSender : IBackgroundMacroTarget
                 if (firstOffset > 0)
                     chunk = chunk.Select(item => item with { OffsetMicroseconds = Math.Max(0, item.OffsetMicroseconds - firstOffset) }).ToArray();
             }
-            var requestId = Guid.NewGuid().ToString("N");
             var completion = new TaskCompletionSource<MacroDispatchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-            lock (_gate) _pending[requestId] = completion;
+            var requestId = RegisterPending(completion);
             try
             {
-                await _client.SendAsync("input.post", new { accountId, events = chunk }, requestId, cancellationToken);
+                await _sendAsync("input.post", new
+                {
+                    accountId,
+                    events = chunk,
+                    // The host parses this additive field while preserving
+                    // compatibility with older plugins that omit it.
+                    deliveryIntent = intent == PlaybackIntent.BackgroundMessageProbe
+                        ? "background-message-probe"
+                        : "background-message"
+                }, requestId, cancellationToken);
                 var chunkDurationSeconds = chunk.Length > 0 ? chunk[^1].OffsetMicroseconds / 1_000_000.0 : 0;
                 var timeout = TimeSpan.FromSeconds(Math.Max(30, chunkDurationSeconds + 10));
                 MacroDispatchResult result;
@@ -53,17 +82,28 @@ public sealed class InputPostSender : IBackgroundMacroTarget
                 }
                 catch (TimeoutException)
                 {
-                    return new MacroDispatchResult(false, "timeout", "The launcher host did not reply to the input in time.", totalPosted);
+                    return new MacroDispatchResult(false, "timeout", "The launcher host did not reply to the input in time.", totalPosted) { AccountId = accountId };
                 }
+                lastResult = result;
                 totalPosted += result.PostedCount;
-                if (!result.Accepted) return result with { PostedCount = totalPosted };
+                if (!result.Accepted) return result with { AccountId = accountId, PostedCount = totalPosted };
             }
             finally
             {
                 lock (_gate) _pending.Remove(requestId);
             }
         }
-        return new MacroDispatchResult(true, "ok", "All input was posted.", totalPosted);
+        return new MacroDispatchResult(true, "ok", "All input was posted.", totalPosted)
+        {
+            AccountId = accountId,
+            DeliveryMode = intent == PlaybackIntent.BackgroundMessageProbe ? "post-message-probe" : "post-message",
+            Verification = "unverified",
+            TraceId = lastResult?.TraceId,
+            DestinationWindow = lastResult?.DestinationWindow ?? nint.Zero,
+            CursorX = lastResult?.CursorX ?? 0,
+            CursorY = lastResult?.CursorY ?? 0,
+            SelectedVisible = lastResult?.SelectedVisible
+        };
     }
 
     public void HandleResult(string requestId, JsonElement payload)
@@ -75,7 +115,25 @@ public sealed class InputPostSender : IBackgroundMacroTarget
         var code = payload.TryGetProperty("code", out var codeElement) ? codeElement.GetString() ?? string.Empty : string.Empty;
         var message = payload.TryGetProperty("message", out var messageElement) ? messageElement.GetString() ?? string.Empty : string.Empty;
         var postedCount = payload.TryGetProperty("postedCount", out var countElement) && countElement.TryGetInt32(out var count) ? count : 0;
-        completion.TrySetResult(new MacroDispatchResult(accepted, code, message, postedCount));
+        var deliveryMode = payload.TryGetProperty("deliveryMode", out var modeElement) ? modeElement.GetString() : null;
+        var verification = payload.TryGetProperty("verification", out var verificationElement) ? verificationElement.GetString() : null;
+        var traceId = payload.TryGetProperty("traceId", out var traceElement) && traceElement.ValueKind != JsonValueKind.Null ? traceElement.GetString() : null;
+        var destination = payload.TryGetProperty("targetRenderWindow", out var destinationElement) && destinationElement.TryGetInt64(out var hwnd)
+            ? new nint(hwnd) : nint.Zero;
+        var cursorX = payload.TryGetProperty("cursorX", out var cursorXElement) && cursorXElement.TryGetInt32(out var x) ? x : 0;
+        var cursorY = payload.TryGetProperty("cursorY", out var cursorYElement) && cursorYElement.TryGetInt32(out var y) ? y : 0;
+        var selectedVisible = payload.TryGetProperty("selectedVisible", out var selectedVisibleElement) && selectedVisibleElement.ValueKind != JsonValueKind.Null
+            ? selectedVisibleElement.GetBoolean() : (bool?)null;
+        completion.TrySetResult(new MacroDispatchResult(accepted, code, message, postedCount)
+        {
+            DeliveryMode = deliveryMode,
+            Verification = verification,
+            TraceId = traceId,
+            DestinationWindow = destination,
+            CursorX = cursorX,
+            CursorY = cursorY,
+            SelectedVisible = selectedVisible
+        });
     }
 
     public void ConnectionClosed()
@@ -97,6 +155,23 @@ public sealed class InputPostSender : IBackgroundMacroTarget
             _pending.Clear();
         }
         foreach (var completion in completions) completion.TrySetResult(failure);
+    }
+
+    private string RegisterPending(TaskCompletionSource<MacroDispatchResult> completion)
+    {
+        lock (_gate)
+        {
+            string requestId;
+            do requestId = Guid.NewGuid().ToString("N");
+            while (_pending.ContainsKey(requestId));
+            _pending.Add(requestId, completion);
+            return requestId;
+        }
+    }
+
+    internal int PendingRequestCount
+    {
+        get { lock (_gate) return _pending.Count; }
     }
 
     internal static WireInput? ToWire(MacroEvent item)

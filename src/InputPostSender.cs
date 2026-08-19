@@ -13,8 +13,9 @@ internal sealed record WireInput(
     double NormalizedY,
     long OffsetMicroseconds);
 
-public sealed class InputPostSender : IBackgroundMacroTarget, IBackgroundMacroIntentTarget
+public sealed class InputPostSender : IBackgroundMacroTarget, IBackgroundMacroIntentTarget, IForegroundMacroTarget
 {
+    private readonly PluginClient? _client;
     private readonly Func<string, object, string, CancellationToken, Task>? _sendAsync;
     private readonly object _gate = new();
     private readonly Dictionary<string, TaskCompletionSource<MacroDispatchResult>> _pending = new(StringComparer.Ordinal);
@@ -22,6 +23,7 @@ public sealed class InputPostSender : IBackgroundMacroTarget, IBackgroundMacroIn
 
     public InputPostSender(PluginClient? client)
     {
+        _client = client;
         _sendAsync = client is null ? null : client.SendAsync;
     }
 
@@ -43,6 +45,36 @@ public sealed class InputPostSender : IBackgroundMacroTarget, IBackgroundMacroIn
         IReadOnlyList<MacroEvent> events,
         PlaybackIntent intent,
         CancellationToken cancellationToken)
+    {
+        return await DispatchCoreAsync(accountId, null, events, intent, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<ForegroundSessionResult> OpenForegroundSessionAsync(IReadOnlyList<string> accountIds, CancellationToken cancellationToken)
+    {
+        if (_client is null) return new(false, "no-host", "The launcher plugin host is not connected.");
+        var response = await _client.RequestAsync("input.session.open", new { accountIds = accountIds.ToArray(), purpose = "macro", restoreForeground = true }, cancellationToken).ConfigureAwait(false);
+        return ReadSessionResult(response);
+    }
+
+    public async Task<ForegroundSessionResult> ActivateForegroundAccountAsync(string sessionId, string accountId, CancellationToken cancellationToken)
+    {
+        if (_client is null) return new(false, "no-host", "The launcher plugin host is not connected.");
+        var response = await _client.RequestAsync("input.session.activate", new { sessionId, accountId }, cancellationToken).ConfigureAwait(false);
+        return ReadSessionResult(response);
+    }
+
+    public async Task<MacroDispatchResult> DispatchForegroundAsync(string sessionId, string accountId, IReadOnlyList<MacroEvent> events, CancellationToken cancellationToken) =>
+        await DispatchCoreAsync(accountId, sessionId, events, PlaybackIntent.ForegroundReal, cancellationToken).ConfigureAwait(false);
+
+    public async Task<ForegroundSessionResult> CloseForegroundSessionAsync(string sessionId, bool restoreForeground, CancellationToken cancellationToken)
+    {
+        if (_client is null) return new(false, "no-host", "The launcher plugin host is not connected.");
+        var response = await _client.RequestAsync("input.session.close", new { sessionId, restoreForeground, userInitiated = false }, cancellationToken).ConfigureAwait(false);
+        return ReadSessionResult(response);
+    }
+
+    private async Task<MacroDispatchResult> DispatchCoreAsync(string accountId, string? sessionId,
+        IReadOnlyList<MacroEvent> events, PlaybackIntent intent, CancellationToken cancellationToken)
     {
         if (_sendAsync is null) return new MacroDispatchResult(false, "no-host", "The launcher plugin host is not connected.", 0) { AccountId = accountId };
         var chunks = ChunkForWire(events, ChunkSize);
@@ -67,11 +99,13 @@ public sealed class InputPostSender : IBackgroundMacroTarget, IBackgroundMacroIn
                 {
                     accountId,
                     events = chunk,
-                    // The host parses this additive field while preserving
-                    // compatibility with older plugins that omit it.
-                    deliveryIntent = intent == PlaybackIntent.BackgroundMessageProbe
-                        ? "background-message-probe"
-                        : "background-message"
+                    sessionId,
+                    deliveryIntent = intent switch
+                    {
+                        PlaybackIntent.ForegroundReal => "foreground-real",
+                        PlaybackIntent.BackgroundMessageProbe => "background-message-probe",
+                        _ => "background-message"
+                    }
                 }, requestId, cancellationToken);
                 var chunkDurationSeconds = chunk.Length > 0 ? chunk[^1].OffsetMicroseconds / 1_000_000.0 : 0;
                 var timeout = TimeSpan.FromSeconds(Math.Max(30, chunkDurationSeconds + 10));
@@ -93,17 +127,30 @@ public sealed class InputPostSender : IBackgroundMacroTarget, IBackgroundMacroIn
                 lock (_gate) _pending.Remove(requestId);
             }
         }
-        return new MacroDispatchResult(true, "ok", "All input was posted.", totalPosted)
+        return new MacroDispatchResult(true, "ok", "All input was injected through the guarded foreground session.", totalPosted)
         {
             AccountId = accountId,
-            DeliveryMode = intent == PlaybackIntent.BackgroundMessageProbe ? "post-message-probe" : "post-message",
-            Verification = "unverified",
+            DeliveryMode = intent switch
+            {
+                PlaybackIntent.ForegroundReal => "send-input-session",
+                PlaybackIntent.BackgroundMessageProbe => lastResult?.DeliveryMode ?? "post-message-probe",
+                _ => "foreground-required"
+            },
+            Verification = intent == PlaybackIntent.ForegroundReal ? "guarded" : lastResult?.Verification ?? "not-delivered",
             TraceId = lastResult?.TraceId,
             DestinationWindow = lastResult?.DestinationWindow ?? nint.Zero,
             CursorX = lastResult?.CursorX ?? 0,
             CursorY = lastResult?.CursorY ?? 0,
             SelectedVisible = lastResult?.SelectedVisible
         };
+    }
+
+    private static ForegroundSessionResult ReadSessionResult(PluginClient.Envelope response)
+    {
+        if (response.Type != "input.session.result")
+            return new(false, "rejected", "The launcher rejected the foreground session request.");
+        return PluginClient.Deserialize<ForegroundSessionResult>(response.Payload)
+               ?? new(false, "invalid-response", "The launcher returned an invalid foreground session response.");
     }
 
     public void HandleResult(string requestId, JsonElement payload)

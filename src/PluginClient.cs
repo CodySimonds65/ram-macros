@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.IO.Pipes;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Collections.Concurrent;
 
 namespace RamMacros;
 
@@ -13,6 +14,7 @@ public sealed class PluginClient : IAsyncDisposable
     private readonly string _token;
     private readonly string _manifestPath;
     private readonly string[] _capabilities;
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<Envelope>> _responses = new(StringComparer.Ordinal);
     private int _disposed;
     public PluginClient(string pipeName, string token, string pluginId, string manifestPath)
     {
@@ -94,11 +96,38 @@ public sealed class PluginClient : IAsyncDisposable
         }
         finally { _writeGate.Release(); }
     }
-    public Task<Envelope?> ReceiveAsync(CancellationToken cancellationToken = default) => ReadAsync(cancellationToken);
+    public async Task<Envelope?> ReceiveAsync(CancellationToken cancellationToken = default)
+    {
+        while (true)
+        {
+            var envelope = await ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (envelope is null) return null;
+            if (_responses.TryGetValue(envelope.RequestId, out var waiter))
+            {
+                waiter.TrySetResult(envelope);
+                continue;
+            }
+            return envelope;
+        }
+    }
+    public async Task<Envelope> RequestAsync(string type, object payload, CancellationToken cancellationToken = default)
+    {
+        var requestId = Guid.NewGuid().ToString("N");
+        var waiter = new TaskCompletionSource<Envelope>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_responses.TryAdd(requestId, waiter)) throw new InvalidOperationException("The plugin request id was duplicated.");
+        try
+        {
+            await SendAsync(type, payload, requestId, cancellationToken).ConfigureAwait(false);
+            return await waiter.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
+        }
+        finally { _responses.TryRemove(requestId, out _); }
+    }
     public static T? Deserialize<T>(JsonElement payload) => payload.Deserialize<T>(Json.Options);
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        foreach (var pending in _responses.Values)
+            pending.TrySetException(new IOException("The plugin host connection closed."));
         try
         {
             await _writeGate.WaitAsync().ConfigureAwait(false);

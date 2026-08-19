@@ -237,6 +237,14 @@ try
 }
 catch (ArgumentException) { multiWindowDuplicateRejected = true; }
 Require(multiWindowDuplicateRejected, "Multi-window playback accepted duplicate account mappings.");
+var foregroundTarget = new RecordingForegroundTarget();
+var foregroundRunner = new SequenceRunner(foregroundTarget);
+var foregroundResults = await foregroundRunner.RunForegroundAsync(playbackMacro, ["account-a", "account-b"], CancellationToken.None);
+Require(foregroundResults.Count == 2 && foregroundResults[0].AccountId == "account-a" && foregroundResults[1].AccountId == "account-b",
+    "Foreground playback did not preserve selected-account order.");
+Require(foregroundTarget.Events.SequenceEqual(["open", "activate:account-a", "dispatch:account-a", "activate:account-b", "dispatch:account-b", "close"]),
+    "Foreground playback did not use one session with ordered activation and one restore.");
+Require(foregroundTarget.CloseCount == 1, "Foreground playback restored more than once.");
 Console.WriteLine("Macro playback smoke tests passed.");
 
 file sealed class FakeMacroTarget(Action onDispatch) : IBackgroundMacroTarget
@@ -270,4 +278,20 @@ file sealed class FailureIsolatingTarget : IBackgroundMacroTarget
         Task.FromResult(accountId == "account-a"
             ? new MacroDispatchResult(false, "stale-window", "stale", 0)
             : new MacroDispatchResult(true, "ok", "ok", events.Count));
+}
+
+file sealed class RecordingForegroundTarget : IBackgroundMacroTarget, IForegroundMacroTarget
+{
+    public List<string> Events { get; } = [];
+    public int CloseCount { get; private set; }
+    public Task<ForegroundSessionResult> OpenForegroundSessionAsync(IReadOnlyList<string> accountIds, CancellationToken cancellationToken)
+    { Events.Add("open"); return Task.FromResult(new ForegroundSessionResult(true, "ok", "ok", "session")); }
+    public Task<ForegroundSessionResult> ActivateForegroundAccountAsync(string sessionId, string accountId, CancellationToken cancellationToken)
+    { Events.Add($"activate:{accountId}"); return Task.FromResult(new ForegroundSessionResult(true, "ok", "ok", sessionId)); }
+    public Task<MacroDispatchResult> DispatchForegroundAsync(string sessionId, string accountId, IReadOnlyList<MacroEvent> events, CancellationToken cancellationToken)
+    { Events.Add($"dispatch:{accountId}"); return Task.FromResult(new MacroDispatchResult(true, "ok", "ok", events.Count)); }
+    public Task<ForegroundSessionResult> CloseForegroundSessionAsync(string sessionId, bool restoreForeground, CancellationToken cancellationToken)
+    { Events.Add("close"); CloseCount++; return Task.FromResult(new ForegroundSessionResult(true, "ok", "ok", sessionId)); }
+    public Task<MacroDispatchResult> DispatchAsync(string accountId, IReadOnlyList<MacroEvent> events, CancellationToken cancellationToken) =>
+        Task.FromResult(new MacroDispatchResult(false, "unexpected", "legacy dispatch should not be used", 0));
 }

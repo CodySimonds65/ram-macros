@@ -5,7 +5,8 @@ public enum PlaybackMode { Once, Repeat, Continuous, WhileHeld }
 public enum PlaybackIntent
 {
     BackgroundMessage,
-    BackgroundMessageProbe
+    BackgroundMessageProbe,
+    ForegroundReal
 }
 
 public sealed record PlaybackRunReport(int RunNumber, IReadOnlyList<MacroDispatchResult> Results)
@@ -54,11 +55,11 @@ public sealed class PlaybackController
         PlaybackMode mode,
         int repeatCount,
         CancellationToken cancellationToken)
-        => await PlayCoreAsync(macro, accountIds, mode, repeatCount, PlaybackIntent.BackgroundMessage, cancellationToken);
+        => await PlayCoreAsync(macro, accountIds, mode, repeatCount, PlaybackIntent.ForegroundReal, cancellationToken);
 
     /// <summary>
-    /// Replays exactly once with an explicit background-message probe intent.
-    /// The result reports posting/acceptance only, not client consumption.
+    /// Retained for compatibility; background probes now fail closed because
+    /// the message-only path is intentionally disabled.
     /// </summary>
     public async Task<PlaybackSummary> PlayProbeAsync(
         MacroDefinition macro,
@@ -116,7 +117,9 @@ public sealed class PlaybackController
                         message = "Playback stopped.";
                         break;
                     }
-                    var results = await _runner.RunConcurrentAsync(macro, targets, loopCts.Token, intent);
+                    var results = intent == PlaybackIntent.ForegroundReal
+                        ? await _runner.RunForegroundAsync(macro, targets, loopCts.Token)
+                        : await _runner.RunConcurrentAsync(macro, targets, loopCts.Token, intent);
                     lastResults = results;
                     runCount++;
                     RaiseRunCompleted(new PlaybackRunReport(runCount, results));
